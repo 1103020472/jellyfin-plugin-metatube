@@ -216,10 +216,17 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             Logger.Info("Search for movie: {0}", info.Name);
 
             string searchName = info.Name;
-            if (info.Name.StartsWith("DSVR-") || info.Name.StartsWith("VRKM-"))
+            if (info.Name != null && (info.Name.StartsWith("DSVR-") || info.Name.StartsWith("VRKM-")))
             {
-                searchName = info.Name.Replace("DSVR-", "3DSVR0");
-                searchName = info.Name.Replace("VRKM-", "VRKM0");
+                if (info.Name.StartsWith("DSVR-"))
+                {
+                    searchName = info.Name.Replace("DSVR-", "3DSVR0");
+                }
+
+                if (info.Name.StartsWith("VRKM-"))
+                {
+                    searchName = info.Name.Replace("VRKM-", "VRKM0");
+                }
                 Logger.Info("---------LJ--------修改番号名：{0}", searchName);
             }
 
