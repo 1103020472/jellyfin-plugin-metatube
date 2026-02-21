@@ -15,6 +15,16 @@ public class ActorInfo : ActorSearchResult
 
     [JsonPropertyName("cup_size")]
     public string CupSize { get; set; }
+    
+    // lj-新增字段，推特、ins、标签
+    [JsonPropertyName("twitter")]
+    public string Twitter { get; set; }
+    
+    [JsonPropertyName("instagram")]
+    public string Instagram { get; set; }
+    
+    [JsonPropertyName("tags")]
+    public string[] Tags { get; set; }
 
     [JsonPropertyName("debut_date")]
     public DateTime DebutDate { get; set; }

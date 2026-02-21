@@ -85,6 +85,7 @@ public class OrganizeMetadataTask : IScheduledTask
 
             var genres = item.Genres?.ToList() ?? new List<string>();
 
+            // 添加中文字幕标签
             try
             {
                 switch (HasEmbeddedChineseSubtitle(item.FileNameWithoutExtension) ||
@@ -111,6 +112,32 @@ public class OrganizeMetadataTask : IScheduledTask
             catch (Exception e)
             {
                 _logger.Error("Update ChineseSubtitle for video {0}: {1}", item.Name, e.Message);
+            }
+            
+            // lj-添加无码标签
+            try
+            {
+                switch (HasWuMaFilename(item.Path))
+                {
+                    case true when !genres.Contains(WuMaGenre):
+                    {
+                        genres.Add(WuMaGenre);
+                        if (Plugin.Instance.Configuration.EnableBadges)
+                            await SetPrimaryImage(item, "wuma.png", cancellationToken);
+                        break;
+                    }
+                    case false when genres.Contains(WuMaGenre):
+                    {
+                        genres.RemoveAll(s => s.Equals(WuMaGenre));
+                        if (Plugin.Instance.Configuration.EnableBadges)
+                            await SetPrimaryImage(item, "wuma.clear.png", cancellationToken);
+                        break;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                _logger.Error("Update WuMaGenre for video {0}: {1}", item.Name, e.Message);
             }
 
             // Remove duplicates.
@@ -144,6 +171,8 @@ public class OrganizeMetadataTask : IScheduledTask
     #region Helper
 
     private const string ChineseSubtitle = "中文字幕";
+    
+    private const string WuMaGenre = "无码破解";
 
     private static bool HasTag(string filename, string tag)
     {
@@ -163,6 +192,15 @@ public class OrganizeMetadataTask : IScheduledTask
 
         return filename.Contains(ChineseSubtitle) || HasTag(filename, "C", "UC", "ch");
     }
+    
+    private static bool HasWuMaFilename(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        IEnumerable<string> files = Directory.GetParent(path)?.GetFiles().Select(info => info.Name);
+        return files != null && files.Any(name => HasTag(name, "U", "u"));
+    }
 
     private static bool HasExternalChineseSubtitle(string path)
     {
@@ -172,7 +210,8 @@ public class OrganizeMetadataTask : IScheduledTask
 
     private static bool HasExternalChineseSubtitle(string basename, IEnumerable<string> files)
     {
-        var r = new Regex(@"\.(ch[ist]|zho?(-(cn|hk|sg|tw))?)\.(ass|srt|ssa|smi|sub|idx|psb|vtt)$",
+        // lj-只要是字幕文件，就认为是中文字幕
+        var r = new Regex(@"\.(ass|srt|ssa|smi|sub|idx|psb|vtt)$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
         return files.Any(name => r.IsMatch(name) &&
                                  r.Replace(name, string.Empty)

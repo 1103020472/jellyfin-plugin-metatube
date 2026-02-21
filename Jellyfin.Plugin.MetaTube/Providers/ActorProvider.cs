@@ -47,6 +47,12 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
             },
             HasMetadata = true
         };
+        
+        // lj-保存标签
+        if (m.Tags != null)
+        {
+            foreach (var tag in m.Tags) result.Item.AddTag(tag);
+        }
 
         // Set ProviderIdModel.
         result.Item.SetPid(Name, m.Provider, m.Id);
@@ -107,14 +113,17 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
         var aliases = a.Aliases?.Where(alias => !string.Equals(alias, a.Name, StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
+        // lj-替换为中文标签
         var info = new List<(string, string)>
         {
             ("別名", string.Join(", ", aliases ?? Enumerable.Empty<string>())),
-            ("3サイズ", a.Measurements),
-            ("カップサイズ", a.CupSize),
-            ("身長", a.Height > 0 ? $"{a.Height}cm" : string.Empty),
-            ("血液型", !string.IsNullOrWhiteSpace(a.BloodType) ? $"{a.BloodType}型" : string.Empty),
-            ("デビュー", a.DebutDate.GetValidDateTime()?.ToString("yyyy年M月d日"))
+            ("三围", a.Measurements),
+            ("罩杯", a.CupSize),
+            ("身高", a.Height > 0 ? $"{a.Height}cm" : string.Empty),
+            ("血型", !string.IsNullOrWhiteSpace(a.BloodType) ? $"{a.BloodType}型" : string.Empty),
+            ("出道日", a.DebutDate.GetValidDateTime()?.ToString("yyyy年M月d日")),
+            ("Twitter", a.Twitter),
+            ("Instagram", a.Instagram)
         };
 
         return string.Join("\n<br>\n",

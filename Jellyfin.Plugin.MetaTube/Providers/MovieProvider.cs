@@ -100,6 +100,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             { @"{maker}", m.Maker },
             { @"{label}", m.Label },
             { @"{director}", m.Director },
+            { @"{runtime}", m.Runtime.ToString() },
             { @"{actors}", m.Actors?.Any() == true ? string.Join(' ', m.Actors) : string.Empty },
             { @"{first_actor}", m.Actors?.FirstOrDefault() },
             { @"{year}", $"{m.ReleaseDate:yyyy}" },
