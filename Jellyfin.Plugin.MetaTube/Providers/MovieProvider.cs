@@ -59,6 +59,13 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         Logger.Info("Get movie info: {0}", pid.ToString());
 
         var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, cancellationToken);
+        
+        if (m.Number != null && m.Number.StartsWith("3DSVR"))
+        {
+            m.Number = m.Number.Replace("3DSVR", "DSVR");
+            Logger.Info("--------LJ---------统一番号名：{0}", m.Number);    
+        }
+        
 
         // Preserve original title.
         var originalTitle = m.Title;
@@ -208,7 +215,23 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         {
             // Search movie by name.
             Logger.Info("Search for movie: {0}", info.Name);
-            searchResults.AddRange(await ApiClient.SearchMovieAsync(info.Name, pid.Provider, cancellationToken));
+
+            string searchName = info.Name;
+            if (info.Name != null && (info.Name.StartsWith("DSVR-") || info.Name.StartsWith("VRKM-")))
+            {
+                if (info.Name.StartsWith("DSVR-"))
+                {
+                    searchName = info.Name.Replace("DSVR-", "3DSVR0");
+                }
+
+                if (info.Name.StartsWith("VRKM-"))
+                {
+                    searchName = info.Name.Replace("VRKM-", "VRKM0");
+                }
+                Logger.Info("---------LJ--------修改番号名：{0}", searchName);
+            }
+
+            searchResults.AddRange(await ApiClient.SearchMovieAsync(searchName, pid.Provider, cancellationToken));
         }
         else
         {
