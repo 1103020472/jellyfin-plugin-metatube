@@ -57,12 +57,11 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         Logger.Info("Get movie info: {0}", pid.ToString());
 
         var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, cancellationToken);
-
         
-        if (m.Title != null && m.Title.StartsWith("3DSVR"))
+        if (m.Number != null && m.Number.StartsWith("3DSVR"))
         {
-            m.Title = m.Title.Replace("3DSVR", "DSVR");
-            Logger.Info("--------LJ---------统一番号名：{0}", m.Title);    
+            m.Number = m.Number.Replace("3DSVR", "DSVR");
+            Logger.Info("--------LJ---------统一番号名：{0}", m.Number);    
         }
         
 
