@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Web;
 using Jellyfin.Plugin.MetaTube.Metadata;
+using MediaBrowser.Model.Logging;
 #if __EMBY__
 using MediaBrowser.Common.Net;
 #endif
@@ -35,7 +36,7 @@ public static class ApiClient
     }
 
     private static string ComposeImageApiUrl(string path, string provider, string id, string url = default,
-        double ratio = -1, double position = -1, bool auto = false, string badge = default)
+        double ratio = -1, double position = -1, bool auto = false, string badge = default, string umr = default)
     {
         return ComposeUrl(Path.Combine(path, provider, id), new NameValueCollection
         {
@@ -44,6 +45,7 @@ public static class ApiClient
             { "pos", position.ToString("R") },
             { "auto", auto.ToString() },
             { "badge", badge },
+            { "umr", umr },
             { "quality", Plugin.Instance.Configuration.DefaultImageQuality.ToString() }
         });
     }
@@ -79,10 +81,10 @@ public static class ApiClient
         });
     }
 
-    public static string GetPrimaryImageApiUrl(string provider, string id, double position = -1, string badge = default)
+    public static string GetPrimaryImageApiUrl(string provider, string id, double position = -1, string badge = default, string umr = default)
     {
         return ComposeImageApiUrl(PrimaryImageApi, provider, id,
-            ratio: Plugin.Instance.Configuration.PrimaryImageRatio, position: position, badge: badge);
+            ratio: Plugin.Instance.Configuration.PrimaryImageRatio, position: position, badge: badge, umr: umr);
     }
 
     public static string GetPrimaryImageApiUrl(string provider, string id, string url, double position = -1,

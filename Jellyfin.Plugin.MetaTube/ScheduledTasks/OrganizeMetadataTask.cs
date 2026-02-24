@@ -18,8 +18,8 @@ namespace Jellyfin.Plugin.MetaTube.ScheduledTasks;
 
 public class OrganizeMetadataTask : IScheduledTask
 {
-    private readonly ILibraryManager _libraryManager;
-    private readonly ILogger _logger;
+    private static ILibraryManager _libraryManager;
+    private static ILogger _logger;
 
 #if __EMBY__
     public OrganizeMetadataTask(ILogManager logManager, ILibraryManager libraryManager)
@@ -81,25 +81,31 @@ public class OrganizeMetadataTask : IScheduledTask
 
             var genres = item.Genres?.ToList() ?? new List<string>();
 
+            // 添加中文字幕标签
+            string zimu = string.Empty;;
+            string umr = string.Empty;
+            bool needSetPrimaryImage = false;
             try
             {
                 switch (HasEmbeddedChineseSubtitle(item.FileNameWithoutExtension) ||
                         HasExternalChineseSubtitle(item.Path))
                 {
                     // Add `ChineseSubtitle` genre.
+                    //case true:
                     case true when !genres.Contains(ChineseSubtitle):
                     {
+                        _logger.Info("添加中文字幕标签 for video: {0}", item.Name);
                         genres.Add(ChineseSubtitle);
-                        if (Plugin.Instance.Configuration.EnableBadges)
-                            await SetPrimaryImage(item, Plugin.Instance.Configuration.BadgeUrl, cancellationToken);
+                        zimu = Plugin.Instance.Configuration.BadgeUrl;
+                        needSetPrimaryImage = true;
                         break;
                     }
                     // Remove `ChineseSubtitle` genre.
                     case false when genres.Contains(ChineseSubtitle):
                     {
+                        _logger.Info("删除中文字幕标签 for video: {0}", item.Name);
                         genres.RemoveAll(s => s.Equals(ChineseSubtitle));
-                        if (Plugin.Instance.Configuration.EnableBadges)
-                            await SetPrimaryImage(item, string.Empty, cancellationToken);
+                        needSetPrimaryImage = true;
                         break;
                     }
                 }
@@ -107,6 +113,47 @@ public class OrganizeMetadataTask : IScheduledTask
             catch (Exception e)
             {
                 _logger.Error("Update ChineseSubtitle for video {0}: {1}", item.Name, e.Message);
+            }
+            
+            // lj-添加无码标签
+            try
+            {
+                switch (HasUmrFile(item.Path))
+                {
+                    //case true:
+                    case true  when !genres.Contains(UmrGenre):
+                    {
+                        _logger.Info("添加无码标签 for video: {0}", item.Name);
+                        genres.Add(UmrGenre);
+                        // 先写死，暂时不做配置化
+                        umr = "umr.png";
+                        needSetPrimaryImage = true;
+                        break;
+                    }
+                    case false when genres.Contains(UmrGenre):
+                    {
+                        _logger.Info("删除无码标签 for video: {0}", item.Name);
+                        genres.RemoveAll(s => s.Equals(UmrGenre));
+                        needSetPrimaryImage = true;
+                        break;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                _logger.Error("Update WuMaGenre for video {0}: {1}", item.Name, e.Message);
+            }
+
+            try
+            {
+                if (needSetPrimaryImage && Plugin.Instance.Configuration.EnableBadges)
+                {
+                    await SetPrimaryImage(item, zimu, umr, cancellationToken);
+                }
+            }
+            catch (Exception e)
+            {
+                _logger.Error("SetPrimaryImage for video {0}: {1}", item.Name, e.Message);
             }
 
             // Remove duplicates.
@@ -117,8 +164,8 @@ public class OrganizeMetadataTask : IScheduledTask
                     : genres).Distinct().OrderByString(genre => genre).ToList();
 
             // Skip updating item if equal.
-            if (!orderedGenres.Any() ||
-                (item.Genres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false))
+            if ((!orderedGenres.Any() ||
+                 (item.Genres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false)) && !needSetPrimaryImage)
                 continue;
 
             item.Genres = orderedGenres.ToArray();
@@ -140,6 +187,8 @@ public class OrganizeMetadataTask : IScheduledTask
     #region Helper
 
     private const string ChineseSubtitle = "中文字幕";
+    
+    private const string UmrGenre = "无码破解";
 
     private static bool HasTag(string filename, string tag)
     {
@@ -168,14 +217,15 @@ public class OrganizeMetadataTask : IScheduledTask
 
     private static bool HasExternalChineseSubtitle(string basename, IEnumerable<string> files)
     {
-        var r = new Regex(@"\.(ch[ist]|zho?(-(cn|hk|sg|tw))?)\.(ass|srt|ssa|smi|sub|idx|psb|vtt)$",
+        // lj-只要是字幕文件，就认为是中文字幕
+        var r = new Regex(@"\.(ass|srt|ssa|smi|sub|idx|psb|vtt)$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
         return files.Any(name => r.IsMatch(name) &&
                                  r.Replace(name, string.Empty)
                                      .Equals(basename, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static async Task SetPrimaryImage(BaseItem item, string badge, CancellationToken cancellationToken)
+    private static async Task SetPrimaryImage(BaseItem item, string badge, string umr, CancellationToken cancellationToken)
     {
         var pid = item.GetPid(Plugin.Instance.Name);
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
@@ -185,9 +235,18 @@ public class OrganizeMetadataTask : IScheduledTask
         // Set first primary image.
         item.SetImage(new ItemImageInfo
         {
-            Path = ApiClient.GetPrimaryImageApiUrl(m.Provider, m.Id, pid.Position ?? -1, badge),
+            Path = ApiClient.GetPrimaryImageApiUrl(m.Provider, m.Id, pid.Position ?? -1, badge, umr),
             Type = ImageType.Primary
         }, 0);
+    }
+    
+    private static bool HasUmrFile(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        IEnumerable<string> files = Directory.GetParent(path)?.GetFiles().Select(info => info.Name);
+        return files != null && files.Any(name => Regex.IsMatch(name, "-U", RegexOptions.IgnoreCase));
     }
 
     #endregion

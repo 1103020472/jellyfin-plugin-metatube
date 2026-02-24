@@ -4,6 +4,7 @@ using MediaBrowser.Common.Plugins;
 using MediaBrowser.Common;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Drawing;
+using MediaBrowser.Model.Logging;
 
 #else
 using MediaBrowser.Model.Plugins;
@@ -16,9 +17,12 @@ namespace Jellyfin.Plugin.MetaTube;
 #if __EMBY__
 public class Plugin : BasePluginSimpleUI<PluginConfiguration>, IHasThumbImage
 {
+    public readonly ILogger logger;
+    
     public Plugin(IApplicationHost applicationHost) : base(applicationHost)
     {
         Instance = this;
+        this.logger = applicationHost.Resolve<ILogManager>().GetLogger(this.Name);
     }
 #else
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
