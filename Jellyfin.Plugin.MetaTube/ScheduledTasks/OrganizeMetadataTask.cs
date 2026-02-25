@@ -146,11 +146,12 @@ public class OrganizeMetadataTask : IScheduledTask
                     : genres).Distinct().OrderByString(genre => genre).ToList();
 
             // Skip updating item if equal.
-            var currentGenres = item.Genres?.OrderBy(g => g).ToList() ?? new List<string>();
+            var currentGenres = item.Genres?.OrderByString(g => g).ToList() ?? new List<string>();
             if (!orderedGenres.Any() ||
                 (currentGenres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false))
                 continue;
-            
+
+            //_logger.Info("需要刷新标签，old={0}, new={1}", string.Join(", ", currentGenres), string.Join(", ", orderedGenres));  
             item.Genres = orderedGenres.ToArray();
 
             _logger.Info("Organize metadata for video: {0}", item.Name);
