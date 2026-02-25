@@ -232,6 +232,18 @@
                                 <input id="txtOpenAiModel" is="emby-input" name="txtOpenAiModel" type="text"/>
                                 <div class="fieldDescription">Custom OpenAI-compatible api model. (optional)</div>
                             </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtMaxChunkSize">OpenAI maxChunkSize:</label>
+                                <input id="txtMaxChunkSize" is="emby-input" name="txtMaxChunkSize" type="number"/>
+                                <div class="fieldDescription">AI翻译时一次性传输的最大文字个数，默认2000</div>
+                            </div>
+                            <div class="checkboxContainer checkboxContainer-withDescription">
+                                <label class="emby-checkbox-label">
+                                    <input id="chkEnableCheck" is="emby-checkbox" name="chkEnableCheck" type="checkbox"/>
+                                    <span>标题已翻译时，跳过翻译</span>
+                                </label>
+                                <div class="fieldDescription checkboxFieldDescription"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -368,6 +380,8 @@
                 $('#txtOpenAiApiKey', page).val(config.OpenAiApiKey).change();
                 $('#txtOpenAiApiUrl', page).val(config.OpenAiApiUrl).change();
                 $('#txtOpenAiModel', page).val(config.OpenAiModel).change();
+                $('#txtMaxChunkSize', page).val(config.MaxChunkSize).change();
+                page.querySelector('#chkEnableCheck').checked = config.EnableCheck;
                 page.querySelector('#chkEnableTitleSubstitution').checked = config.EnableTitleSubstitution;
                 $('#txtTitleRawSubstitutionTable', page).val(config.TitleRawSubstitutionTable).change();
                 page.querySelector('#chkEnableActorSubstitution').checked = config.EnableActorSubstitution;
@@ -409,6 +423,8 @@
                 config.OpenAiApiKey = $('#txtOpenAiApiKey', form).val();
                 config.OpenAiApiUrl = $('#txtOpenAiApiUrl', form).val();
                 config.OpenAiModel = $('#txtOpenAiModel', form).val();
+                config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
+                config.EnableCheck = $('#chkEnableCheck', form).prop('checked');
                 config.EnableTitleSubstitution = $('#chkEnableTitleSubstitution', form).prop('checked');
                 config.TitleRawSubstitutionTable = $('#txtTitleRawSubstitutionTable', form).val();
                 config.EnableActorSubstitution = $('#chkEnableActorSubstitution', form).prop('checked');

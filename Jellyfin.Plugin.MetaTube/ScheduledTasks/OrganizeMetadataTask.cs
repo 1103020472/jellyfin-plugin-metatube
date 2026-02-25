@@ -84,20 +84,17 @@ public class OrganizeMetadataTask : IScheduledTask
             // 添加中文字幕标签
             string zimu = string.Empty;;
             string umr = string.Empty;
-            bool needSetPrimaryImage = false;
             try
             {
                 switch (HasEmbeddedChineseSubtitle(item.FileNameWithoutExtension) ||
                         HasExternalChineseSubtitle(item.Path))
                 {
                     // Add `ChineseSubtitle` genre.
-                    //case true:
                     case true when !genres.Contains(ChineseSubtitle):
                     {
                         _logger.Info("添加中文字幕标签 for video: {0}", item.Name);
                         genres.Add(ChineseSubtitle);
                         zimu = Plugin.Instance.Configuration.BadgeUrl;
-                        needSetPrimaryImage = true;
                         break;
                     }
                     // Remove `ChineseSubtitle` genre.
@@ -105,7 +102,6 @@ public class OrganizeMetadataTask : IScheduledTask
                     {
                         _logger.Info("删除中文字幕标签 for video: {0}", item.Name);
                         genres.RemoveAll(s => s.Equals(ChineseSubtitle));
-                        needSetPrimaryImage = true;
                         break;
                     }
                 }
@@ -127,14 +123,12 @@ public class OrganizeMetadataTask : IScheduledTask
                         genres.Add(UmrGenre);
                         // 先写死，暂时不做配置化
                         umr = "umr.png";
-                        needSetPrimaryImage = true;
                         break;
                     }
                     case false when genres.Contains(UmrGenre):
                     {
                         _logger.Info("删除无码标签 for video: {0}", item.Name);
                         genres.RemoveAll(s => s.Equals(UmrGenre));
-                        needSetPrimaryImage = true;
                         break;
                     }
                 }
@@ -142,18 +136,6 @@ public class OrganizeMetadataTask : IScheduledTask
             catch (Exception e)
             {
                 _logger.Error("Update WuMaGenre for video {0}: {1}", item.Name, e.Message);
-            }
-
-            try
-            {
-                if (needSetPrimaryImage && Plugin.Instance.Configuration.EnableBadges)
-                {
-                    await SetPrimaryImage(item, zimu, umr, cancellationToken);
-                }
-            }
-            catch (Exception e)
-            {
-                _logger.Error("SetPrimaryImage for video {0}: {1}", item.Name, e.Message);
             }
 
             // Remove duplicates.
@@ -165,12 +147,26 @@ public class OrganizeMetadataTask : IScheduledTask
 
             // Skip updating item if equal.
             if ((!orderedGenres.Any() ||
-                 (item.Genres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false)) && !needSetPrimaryImage)
+                 (item.Genres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false)))
                 continue;
 
             item.Genres = orderedGenres.ToArray();
 
             _logger.Info("Organize metadata for video: {0}", item.Name);
+            
+            // 只要认为需要更新标签，就同步修改图片
+            try
+            {
+                if (Plugin.Instance.Configuration.EnableBadges)
+                {
+                    _logger.Info("修改图片标签 for video: {0}", item.Name);
+                    await SetPrimaryImage(item, zimu, umr, cancellationToken);
+                }
+            }
+            catch (Exception e)
+            {
+                _logger.Error("SetPrimaryImage for video {0}: {1}", item.Name, e.Message);
+            }
 
 #if __EMBY__
             _libraryManager.UpdateItem(item, item, ItemUpdateType.MetadataEdit, null);

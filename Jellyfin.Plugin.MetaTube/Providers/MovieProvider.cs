@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using Jellyfin.Plugin.MetaTube.Configuration;
 using Jellyfin.Plugin.MetaTube.Extensions;
 using Jellyfin.Plugin.MetaTube.Metadata;
@@ -46,6 +47,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
     public async Task<MetadataResult<Movie>> GetMetadata(MovieInfo info,
         CancellationToken cancellationToken)
     {
+        Logger.Info("GetMetadata MovieInfo.Name: {0}", info.Name);
         var pid = info.GetPid(Name);
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
         {
@@ -85,8 +87,32 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             m.Genres = Configuration.GetGenreSubstitutionTable().Substitute(m.Genres).ToArray();
 
         // Translate movie info.
+        // 1. 定义检测中文的逻辑
+        // \u4e00-\u9fa5 是基本汉字的范围
+        bool alreadyTranslate = !string.IsNullOrWhiteSpace(info.Name) && Regex.IsMatch(info.Name, @"[\u4e00-\u9fa5]") && !info.Name.StartsWith("[");
+
+        // 2. 修改翻译触发条件
+        // 如果未开启翻译，或者已经有了中文名称，就跳过翻译步骤
         if (Configuration.TranslationMode != TranslationMode.Disabled)
-            await TranslateMovieInfo(m, info.MetadataLanguage, cancellationToken);
+        {
+            // 开关打开，同时有中文，就跳过翻译
+            if (alreadyTranslate && Configuration.EnableCheck)
+            {
+                Logger.Info("已经是中文了，跳过翻译阶段:'{0}'.", m.Number);
+                // 置为null表示不更新summary。
+                m.Summary = null;
+                if (m.Number != null)
+                {
+                    m.Title = info.Name.Substring(m.Number.Length + 1);
+                    //Logger.Info("还原title:'{0}'.", m.Title);
+                }
+            }
+            else
+            {
+                await TranslateMovieInfo(m, info.MetadataLanguage, cancellationToken);
+                m.Summary = ConvertNewlinesToBr(m.Summary);
+            }
+        }
 
         // Distinct and clean blank list
         m.Genres = m.Genres?.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray() ?? Array.Empty<string>();
@@ -347,7 +373,9 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         try
         {
             Logger.Info("Translate movie info language: {0} => {1}", m.Number, language);
+            var start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             await TranslationHelper.TranslateAsync(m, language, cancellationToken);
+            Logger.Info("Translate movie end, cost:{0}ms: {1} => {2}", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, m.Number, language);
         }
         catch (Exception e)
         {
@@ -366,4 +394,20 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
 
         return sb.ToString().Trim();
     }
+    
+    private static string ConvertNewlinesToBr(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+        {
+            return input; // 空值保护，避免空引用异常
+        }
+        
+        // 分步替换，确保所有换行符都被处理
+        string result = input.Replace(Environment.NewLine, "<br>") // 系统默认换行符
+            .Replace("\n", "<br>")                // Linux/Mac换行符
+            .Replace("\r", "<br>");               // 单独的回车符
+        
+        return result;
+    }
+
 }

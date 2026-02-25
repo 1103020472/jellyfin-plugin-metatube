@@ -14,7 +14,7 @@ public static class TranslationHelper
 
     private static PluginConfiguration Configuration => Plugin.Instance.Configuration;
 
-    private static async Task<string> TranslateAsync(string q, string from, string to,
+    private static async Task<string> TranslateAsync(string q, string from, string to, string title, int chunkIndex,
         CancellationToken cancellationToken)
     {
         int millisecondsDelay;
@@ -69,9 +69,13 @@ public static class TranslationHelper
             async Task<string> TranslateWithDelay()
             {
                 await Task.Delay(millisecondsDelay, cancellationToken);
-                return (await ApiClient
+                Plugin.Instance.logger.Info("Translating start {0}: {1}", title, chunkIndex);
+                var start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var translationInfo = await ApiClient
                     .TranslateAsync(q, from, to, Configuration.TranslationEngine.ToString(), nv, cancellationToken)
-                    .ConfigureAwait(false)).TranslatedText;
+                    .ConfigureAwait(false);
+                Plugin.Instance.logger.Info("Translating end, cost:{0}ms {1}: {2}", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, title, chunkIndex);
+                return translationInfo.TranslatedText;
             }
 
             return await RetryAsync(TranslateWithDelay, 5);
@@ -94,18 +98,18 @@ public static class TranslationHelper
         // --- 1. 准备标题任务 ---
         if (Configuration.TranslationMode.HasFlag(TranslationMode.Title) && !string.IsNullOrWhiteSpace(m.Title))
         {
-            titleTask = TranslateAsync(m.Title, AutoLanguageCode, to, cancellationToken);
+            titleTask = TranslateAsync(m.Title, AutoLanguageCode, to, m.Id, 0, cancellationToken);
         }
 
         // --- 2. 准备摘要分段任务 ---
         List<string> summaryChunks = new List<string>();
         if (Configuration.TranslationMode.HasFlag(TranslationMode.Summary) && !string.IsNullOrWhiteSpace(m.Summary))
         {
-            summaryChunks = SplitText(m.Summary, 3000);
+            summaryChunks = SplitText(m.Summary, Configuration.MaxChunkSize);
             Plugin.Instance.logger.Info("Translated summary chunks size: {0}", summaryChunks.Count);
-            foreach (var chunk in summaryChunks)
+            foreach (var (chunk, index) in summaryChunks.Select((chunk, idx) => (chunk, idx)))
             {
-                summaryTasks.Add(TranslateAsync(chunk, AutoLanguageCode, to, cancellationToken));
+                summaryTasks.Add(TranslateAsync(chunk, AutoLanguageCode, to, m.Id, index + 1, cancellationToken));
             }
         }
 

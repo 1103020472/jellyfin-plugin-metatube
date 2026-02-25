@@ -202,6 +202,18 @@ public class PluginConfiguration : BasePluginConfiguration
 #endif
     public string OpenAiModel { get; set; } = string.Empty;
 
+    // 翻译时最大传输的文字个数，避免一次性传太多需要AI翻译很久
+#if __EMBY__
+    [DisplayName("Translation MaxChunkSize")]
+#endif
+    public int MaxChunkSize { get; set; } = 2000;
+    
+    // 标题已经包含中文时，认为已经翻译过了
+#if __EMBY__
+    [DisplayName("Translation EnableCheck")]
+#endif
+    public bool EnableCheck { get; set; } = false;
+    
 #if __EMBY__
     [DisplayName("Enable title substitution")]
 #endif
