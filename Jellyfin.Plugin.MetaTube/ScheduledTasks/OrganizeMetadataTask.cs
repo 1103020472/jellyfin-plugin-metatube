@@ -146,10 +146,11 @@ public class OrganizeMetadataTask : IScheduledTask
                     : genres).Distinct().OrderByString(genre => genre).ToList();
 
             // Skip updating item if equal.
-            if ((!orderedGenres.Any() ||
-                 (item.Genres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false)))
+            var currentGenres = item.Genres?.OrderBy(g => g).ToList() ?? new List<string>();
+            if (!orderedGenres.Any() ||
+                (currentGenres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false))
                 continue;
-
+            
             item.Genres = orderedGenres.ToArray();
 
             _logger.Info("Organize metadata for video: {0}", item.Name);
@@ -216,9 +217,7 @@ public class OrganizeMetadataTask : IScheduledTask
         // lj-只要是字幕文件，就认为是中文字幕
         var r = new Regex(@"\.(ass|srt|ssa|smi|sub|idx|psb|vtt)$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-        return files.Any(name => r.IsMatch(name) &&
-                                 r.Replace(name, string.Empty)
-                                     .Equals(basename, StringComparison.OrdinalIgnoreCase));
+        return files.Any(name => r.IsMatch(name));
     }
 
     private static async Task SetPrimaryImage(BaseItem item, string badge, string umr, CancellationToken cancellationToken)
