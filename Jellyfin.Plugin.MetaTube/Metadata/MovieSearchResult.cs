@@ -24,4 +24,6 @@ public class MovieSearchResult : ProviderInfo
 
     [JsonPropertyName("title")]
     public string Title { get; set; }
+    
+    public List<ReviewInfo> Reviews { get; set; }
 }

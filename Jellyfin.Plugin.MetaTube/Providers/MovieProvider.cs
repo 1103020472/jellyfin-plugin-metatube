@@ -65,6 +65,20 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             m.Number = m.Number.Replace("3DSVR", "DSVR");
             Logger.Info("--------LJ---------统一番号名：{0}", m.Number);    
         }
+
+        if (Configuration.ReviewSwitch && pid.Provider is "FANZA")
+        {
+            Logger.Info("获取评论：{0}", pid.Id);
+            try
+            {
+                var reviewInfos = await ApiClient.GetReviewsAsync(pid.Provider, pid.Id, cancellationToken);
+                m.Reviews = reviewInfos;
+            }
+            catch (Exception e)
+            {
+                Logger.Error("获取评论失败：{0}", pid.Id, e);
+            }
+        }
         
 
         // Preserve original title.
@@ -421,9 +435,10 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         }
         
         // 分步替换，确保所有换行符都被处理
-        string result = input.Replace(Environment.NewLine, "<br>") // 系统默认换行符
-            .Replace("\n", "<br>")                // Linux/Mac换行符
-            .Replace("\r", "<br>");               // 单独的回车符
+        string result = input
+            .Replace("\r\n", "\n")                
+            .Replace("\r", "\n")                // Linux/Mac换行符
+            .Replace("\n", "<br>");               // 单独的回车符
         
         return result;
     }

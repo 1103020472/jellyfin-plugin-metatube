@@ -16,6 +16,7 @@ public static class ApiClient
     private const string MovieInfoApi = "/v1/movies";
     private const string ActorSearchApi = "/v1/actors/search";
     private const string MovieSearchApi = "/v1/movies/search";
+    private const string ReviewApi = "/v1/reviews";
     private const string PrimaryImageApi = "/v1/images/primary";
     private const string ThumbImageApi = "/v1/images/thumb";
     private const string BackdropImageApi = "/v1/images/backdrop";
@@ -66,6 +67,11 @@ public static class ApiClient
             { "provider", provider },
             { "fallback", fallback.ToString() }
         });
+    }
+    
+    private static string ComposeReviewApiUrl(string path, string provider, string pid)
+    {
+        return ComposeUrl(Path.Combine(path, provider, pid), new NameValueCollection());
     }
 
     private static string ComposeTranslateApiUrl(string path, string q, string from, string to, string engine,
@@ -201,6 +207,13 @@ public static class ApiClient
     {
         var apiUrl = ComposeSearchApiUrl(MovieSearchApi, q, provider, fallback);
         return await GetDataAsync<List<MovieSearchResult>>(apiUrl, true, cancellationToken);
+    }
+    
+    public static async Task<List<ReviewInfo>> GetReviewsAsync(string provider, string pid,
+        CancellationToken cancellationToken)
+    {
+        var apiUrl = ComposeReviewApiUrl(ReviewApi, provider, pid);
+        return await GetDataAsync<List<ReviewInfo>>(apiUrl, true, cancellationToken);
     }
 
     public static async Task<TranslationInfo> TranslateAsync(string q, string from, string to, string engine,

@@ -244,6 +244,13 @@
                                 </label>
                                 <div class="fieldDescription checkboxFieldDescription"></div>
                             </div>
+                            <div class="checkboxContainer checkboxContainer-withDescription">
+                                <label class="emby-checkbox-label">
+                                    <input id="chkReviewSwitch" is="emby-checkbox" name="chkReviewSwitch" type="checkbox"/>
+                                    <span>是否要获取评论（只支持FANZA）</span>
+                                </label>
+                                <div class="fieldDescription checkboxFieldDescription"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -382,6 +389,7 @@
                 $('#txtOpenAiModel', page).val(config.OpenAiModel).change();
                 $('#txtMaxChunkSize', page).val(config.MaxChunkSize).change();
                 page.querySelector('#chkEnableCheck').checked = config.EnableCheck;
+                page.querySelector('#chkReviewSwitch').checked = config.ReviewSwitch;
                 page.querySelector('#chkEnableTitleSubstitution').checked = config.EnableTitleSubstitution;
                 $('#txtTitleRawSubstitutionTable', page).val(config.TitleRawSubstitutionTable).change();
                 page.querySelector('#chkEnableActorSubstitution').checked = config.EnableActorSubstitution;
@@ -425,6 +433,7 @@
                 config.OpenAiModel = $('#txtOpenAiModel', form).val();
                 config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
                 config.EnableCheck = $('#chkEnableCheck', form).prop('checked');
+                config.ReviewSwitch = $('#chkReviewSwitch', form).prop('checked');
                 config.EnableTitleSubstitution = $('#chkEnableTitleSubstitution', form).prop('checked');
                 config.TitleRawSubstitutionTable = $('#txtTitleRawSubstitutionTable', form).val();
                 config.EnableActorSubstitution = $('#chkEnableActorSubstitution', form).prop('checked');

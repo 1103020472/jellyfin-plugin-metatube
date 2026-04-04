@@ -214,6 +214,12 @@ public class PluginConfiguration : BasePluginConfiguration
 #endif
     public bool EnableCheck { get; set; } = false;
     
+    // 是否要获取评论（只支持FANZA）
+#if __EMBY__
+    [DisplayName("Show Reviews")]
+#endif
+    public bool ReviewSwitch { get; set; } = false;
+    
 #if __EMBY__
     [DisplayName("Enable title substitution")]
 #endif
