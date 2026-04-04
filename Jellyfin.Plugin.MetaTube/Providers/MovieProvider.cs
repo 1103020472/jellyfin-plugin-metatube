@@ -240,18 +240,36 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         {
             // Search movie by name.
             Logger.Info("Search for movie: {0}", info.Name);
+            
+            // ===================== 配置区：以后加前缀只改这里 =====================
+            // 格式：旧前缀 → 新前缀（数字3位用00补，4位用0补）
+            var prefixMap = new Dictionary<string, string>
+            {
+                { "DSVR-", "3DSVR" },   // DSVR-xxx → 3DSVR00xxx / 3DSVR0xxxx
+                { "VRKM-", "VRKM" },    // VRKM-xxx → VRKM00xxx / VRKM0xxxx
+                { "SAVR-", "SAVR" }     // ✅ 新增 SAVR 支持
+            };
+            // ======================================================================
 
             string searchName = info.Name;
-            if (info.Name != null && (info.Name.StartsWith("DSVR-") || info.Name.StartsWith("VRKM-")))
-            {
-                if (info.Name.StartsWith("DSVR-"))
-                {
-                    searchName = info.Name.Replace("DSVR-", "3DSVR0");
-                }
 
-                if (info.Name.StartsWith("VRKM-"))
+            if (!string.IsNullOrEmpty(info.Name))
+            {
+                // 遍历所有配置的前缀，自动匹配
+                foreach (var (oldPrefix, newPrefix) in prefixMap)
                 {
-                    searchName = info.Name.Replace("VRKM-", "VRKM0");
+                    if (info.Name.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // 正则提取数字
+                        var match = Regex.Match(info.Name, $@"{Regex.Escape(oldPrefix)}(\d+)", RegexOptions.IgnoreCase);
+                        if (match.Success)
+                        {
+                            string digits = match.Groups[1].Value;
+                            string append = digits.Length == 3 ? "00" : "0";
+                            searchName = newPrefix + append + digits;
+                        }
+                        break;
+                    }
                 }
                 Logger.Info("---------LJ--------修改番号名：{0}", searchName);
             }
