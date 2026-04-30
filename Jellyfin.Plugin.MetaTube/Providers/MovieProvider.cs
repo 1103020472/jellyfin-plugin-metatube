@@ -65,6 +65,35 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             m.Number = m.Number.Replace("3DSVR", "DSVR");
             Logger.Info("--------LJ---------统一番号名：{0}", m.Number);    
         }
+        
+        // 新增规则：处理 DSVR 或 VRKM 开头的番号，格式化数字部分
+        if (m.Number != null && (m.Number.StartsWith("DSVR") || m.Number.StartsWith("VRKM")))
+        {
+            // 按分隔符 - 拆分前缀和数字部分
+            var parts = m.Number.Split('-');
+            if (parts.Length == 2)
+            {
+                string prefix = parts[0]; // 前缀：DSVR / VRKM
+                string numStr = parts[1]; // 原始数字字符串
+
+                // 1. 去除数字部分的所有前缀 0
+                string noZeroNum = numStr.TrimStart('0');
+
+                // 2. 保证数字部分至少 3 位，不足补 0
+                string formatNum = noZeroNum.PadLeft(3, '0');
+
+                // 3. 拼接成新番号
+                string newNumber = $"{prefix}-{formatNum}";
+
+                // 只有发生变化才更新并记录日志
+                if (newNumber != m.Number)
+                {
+                    m.Number = newNumber;
+                    Logger.Info("--------LJ---------格式化番号数字：{0}", m.Number);
+                }
+            }
+        }
+
 
         if (Configuration.ReviewSwitch && pid.Provider is "FANZA")
         {
@@ -103,7 +132,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         // Translate movie info.
         // 1. 定义检测中文的逻辑
         // \u4e00-\u9fa5 是基本汉字的范围
-        bool alreadyTranslate = !string.IsNullOrWhiteSpace(info.Name) && Regex.IsMatch(info.Name, @"[\u4e00-\u9fa5]") && !info.Name.StartsWith("[");
+        bool alreadyTranslate = !string.IsNullOrWhiteSpace(info.Name) && !Regex.IsMatch(info.Name, @"[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF]") && !info.Name.StartsWith("[");
 
         // 2. 修改翻译触发条件
         // 如果未开启翻译，或者已经有了中文名称，就跳过翻译步骤

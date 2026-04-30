@@ -95,151 +95,135 @@ public static class TranslationHelper
         // 用于追踪所有的异步任务
         var titleTask = Task.FromResult<string>(null);
         var summaryTasks = new List<Task<string>>();
-        
-        // --- 1. 准备标题任务 ---
+        var reviewHtmlTask = Task.FromResult<string>(null); // 评论整段HTML翻译任务
+
+        // ==============================================
+        // 【第一步：提前拼接评论 HTML（不翻译，只拼结构）】
+        // ==============================================
+        string reviewHtmlContent = string.Empty;
+        if (m.Reviews != null && m.Reviews.Any())
+        {
+            var sb = new StringBuilder();
+
+            foreach (var c in m.Reviews)
+            {
+                // 1. 作者 + 时间
+                string author = string.IsNullOrWhiteSpace(c.Author) ? "匿名用户" : c.Author;
+                string commentTime = c.Date != DateTime.MinValue ? $"{c.Date:yyyy-MM-dd}" : "";
+                sb.Append($"👤 {author}");
+                if (!string.IsNullOrWhiteSpace(commentTime))
+                    sb.Append($" · {commentTime}");
+                sb.Append("<br>");
+
+                // 2. 星级 + 标题
+                int score = Math.Clamp(c.Score, 0, 5);
+                string filledStar = new string('⭐', score);
+                string emptyStar = new string('☆', 5 - score);
+                string starIcon = $"{filledStar}{emptyStar}";
+                string commentTitle = string.IsNullOrWhiteSpace(c.Title) ? "" : c.Title;
+                if (!string.IsNullOrWhiteSpace(starIcon) || !string.IsNullOrWhiteSpace(commentTitle))
+                    sb.Append($"<b>{starIcon} {commentTitle}</b><br>");
+
+                // 3. 评论内容（原文，暂不翻译）
+                if (!string.IsNullOrWhiteSpace(c.Comment))
+                    sb.Append($"{c.Comment}<br>");
+
+                sb.Append("<br><br>");
+            }
+
+            reviewHtmlContent = sb.ToString();
+        }
+
+        // ==============================================
+        // 【第二步：准备翻译任务】
+        // ==============================================
+
+        // --- 1. 标题翻译 ---
         if (Configuration.TranslationMode.HasFlag(TranslationMode.Title) && !string.IsNullOrWhiteSpace(m.Title))
         {
             titleTask = TranslateAsync(m.Title, AutoLanguageCode, to, m.Id, 0, cancellationToken);
         }
 
-        // --- 2. 准备摘要分段任务 ---
+        // --- 2. 摘要翻译（分片）---
         List<string> summaryChunks = new List<string>();
         if (Configuration.TranslationMode.HasFlag(TranslationMode.Summary) && !string.IsNullOrWhiteSpace(m.Summary))
         {
             summaryChunks = SplitText(m.Summary, Configuration.MaxChunkSize);
-            Plugin.Instance.logger.Info("Translated summary chunks size: {0}", summaryChunks.Count);
+            Plugin.Instance.logger.Info("摘要分片数量: {0}", summaryChunks.Count);
             foreach (var (chunk, index) in summaryChunks.Select((chunk, idx) => (chunk, idx)))
             {
                 summaryTasks.Add(TranslateAsync(chunk, AutoLanguageCode, to, m.Id, index + 1, cancellationToken));
             }
         }
-        
-        // --- 3. 准备评论翻译任务（Title + Comment 都翻译）---
-        var reviewTitleTasks = new List<Task<string>>();    // 评论标题翻译
-        var reviewCommentTasks = new List<Task<string>>(); // 评论内容翻译
-        if (m.Reviews != null && m.Reviews.Any())
+
+        // --- 3. 评论整段 HTML 翻译（完全复用 Summary 分片逻辑）---
+        List<string> reviewChunks = new List<string>();
+        if (Configuration.TranslationMode.HasFlag(TranslationMode.Summary) && !string.IsNullOrWhiteSpace(reviewHtmlContent))
         {
-            Plugin.Instance.logger.Info("准备翻译 {0} 条评论的标题 + 内容", m.Reviews.Count);
+            // 评论内容也按最大分片大小切割，和摘要完全一样
+            reviewChunks = SplitText(reviewHtmlContent, Configuration.MaxChunkSize);
+            Plugin.Instance.logger.Info("评论HTML分片数量: {0}", reviewChunks.Count);
 
-            foreach (var (comment, index) in m.Reviews.Select((c, i) => (c, i)))
+            var reviewTasks = new List<Task<string>>();
+            foreach (var (chunk, index) in reviewChunks.Select((chunk, idx) => (chunk, idx)))
             {
-                int taskId = 1000 + index;
-
-                // 翻译评论标题
-                if (!string.IsNullOrWhiteSpace(comment.Title))
-                {
-                    reviewTitleTasks.Add(TranslateAsync(comment.Title, AutoLanguageCode, to, m.Id, taskId, cancellationToken));
-                }
-                else
-                {
-                    reviewTitleTasks.Add(Task.FromResult<string>(null));
-                }
-
-                // 翻译评论内容
-                if (!string.IsNullOrWhiteSpace(comment.Comment))
-                {
-                    reviewCommentTasks.Add(TranslateAsync(comment.Comment, AutoLanguageCode, to, m.Id, taskId + 100, cancellationToken));
-                }
-                else
-                {
-                    reviewCommentTasks.Add(Task.FromResult<string>(null));
-                }
+                // taskId 从 5000 开始，避免和其他任务冲突
+                reviewTasks.Add(TranslateAsync(chunk, AutoLanguageCode, to, m.Id, 5000 + index, cancellationToken));
             }
+
+            // 等待评论所有分片完成，合并成完整翻译后的 HTML
+            var translatedReviewChunks = await Task.WhenAll(reviewTasks);
+            reviewHtmlTask = Task.FromResult(string.Join("<br>", translatedReviewChunks));
         }
 
-        // --- 3. 统一并行执行 ---
-        // 构造一个包含所有任务的列表进行等待
+        // ==============================================
+        // 【第三步：统一等待所有任务】
+        // ==============================================
         var allTasks = new List<Task>(summaryTasks);
-        allTasks.AddRange(reviewTitleTasks);
-        allTasks.AddRange(reviewCommentTasks);
-        if (titleTask != Task.FromResult<string>(null)) allTasks.Add(titleTask);
+        if (titleTask != Task.FromResult<string>(null))
+            allTasks.Add(titleTask);
+        if (reviewHtmlTask != Task.FromResult<string>(null))
+            allTasks.Add(reviewHtmlTask);
 
         await Task.WhenAll(allTasks);
 
-        // --- 4. 回写结果 ---
-        if (titleTask != null && titleTask.Status == TaskStatus.RanToCompletion)
+        // ==============================================
+        // 【第四步：回写翻译结果】
+        // ==============================================
+
+        // 1. 标题
+        if (titleTask.Status == TaskStatus.RanToCompletion)
         {
             m.Title = await titleTask;
         }
 
-        // --- 6. 回写摘要 ---
+        // 2. 摘要
         string finalSummary = m.Summary ?? "";
         if (summaryTasks.Any())
         {
             var translatedChunks = await Task.WhenAll(summaryTasks);
             finalSummary = string.Join("", translatedChunks);
         }
-        
-        // --- 7. 回写评论（标题 + 内容）---
-        if (reviewTitleTasks.Any() && reviewCommentTasks.Any())
+
+        // 3. 把【翻译后的评论HTML】追加到摘要末尾
+        if (reviewHtmlTask.Status == TaskStatus.RanToCompletion)
         {
-            var translatedTitles = await Task.WhenAll(reviewTitleTasks);
-            var translatedComments = await Task.WhenAll(reviewCommentTasks);
-
-            for (int i = 0; i < m.Reviews.Count; i++)
+            var translatedReviewHtml = await reviewHtmlTask;
+            if (!string.IsNullOrWhiteSpace(translatedReviewHtml))
             {
-                var c = m.Reviews[i];
+                var sb = new StringBuilder();
 
-                if (i < translatedTitles.Length && !string.IsNullOrWhiteSpace(translatedTitles[i]))
-                    c.Title = translatedTitles[i];
-
-                if (i < translatedComments.Length && !string.IsNullOrWhiteSpace(translatedComments[i]))
-                    c.Comment = translatedComments[i];
-            }
-
-            Plugin.Instance.logger.Info("评论翻译完成：{0} 条", m.Reviews.Count);
-        }
-
-        // --- 8. 拼接评论到概述（匹配参考样式）---
-        if (m.Reviews != null && m.Reviews.Any())
-        {
-            var sb = new StringBuilder();
-    
-            // 评论区标题 + 分割线
-            sb.Append("<br><br>");
-            sb.Append("————————————————————————————<br>");
-            sb.Append("<font color=\"#fce83a\" size=\"4\"><b>📝 观众评论</b></font><br>");
-            sb.Append("<br>");
-
-            foreach (var c in m.Reviews)
-            {
-                // 1. 作者 + 时间（前置，普通文字）
-                string author = string.IsNullOrWhiteSpace(c.Author) ? "匿名用户" : c.Author;
-                // 假设你的评论实体有时间字段（无则删除）
-                string commentTime = c.Date != DateTime.MinValue ? $"{c.Date:yyyy-MM-dd}" : "";
-                sb.Append($"👤 {author}");
-                if (!string.IsNullOrWhiteSpace(commentTime))
-                {
-                    sb.Append($" · {commentTime}");
-                }
-                sb.Append("<br>");
-
-                // 2. 星级 + 标题（5星补全：实星+灰星，整体加粗）
-                int score = Math.Clamp(c.Score, 0, 5); // 限制星级0-5
-                string filledStar = new string('⭐', score); // 亮星（实星）
-                string emptyStar = new string('☆', 5 - score); // 灰星（空星）
-                string starIcon = $"{filledStar}{emptyStar}"; // 拼接成5颗星
-        
-                string commentTitle = string.IsNullOrWhiteSpace(c.Title) ? "" : c.Title;
-                if (!string.IsNullOrWhiteSpace(starIcon) || !string.IsNullOrWhiteSpace(commentTitle))
-                {
-                    sb.Append($"<b>{starIcon} {commentTitle}</b><br>");
-                }
-
-                // 3. 评论内容（纯文本，无样式）
-                if (!string.IsNullOrWhiteSpace(c.Comment))
-                {
-                    sb.Append($"{c.Comment}<br>");
-                }
-
-                // 4. 每条评论之间用两个<br>分隔
+                // 评论区标题 + 分割线
                 sb.Append("<br><br>");
+                sb.Append("————————————————————————————<br>");
+                sb.Append("<font color=\"#fce83a\" size=\"4\"><b>📝 观众评论</b></font><br>");
+                sb.Append("<br>");
+                finalSummary += sb.ToString();
+                finalSummary += translatedReviewHtml;
             }
-
-            finalSummary += sb.ToString();
         }
 
-        // 最终回写
+        // 最终回写到 Summary
         m.Summary = finalSummary;
     }
     
