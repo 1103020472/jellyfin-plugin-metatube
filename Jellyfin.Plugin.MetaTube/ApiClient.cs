@@ -69,9 +69,12 @@ public static class ApiClient
         });
     }
     
-    private static string ComposeReviewApiUrl(string path, string provider, string pid)
+    private static string ComposeReviewApiUrl(string path, string provider, string pid, bool lazy)
     {
-        return ComposeUrl(Path.Combine(path, provider, pid), new NameValueCollection());
+        return ComposeUrl(Path.Combine(path, provider, pid), new NameValueCollection
+        {
+            { "lazy", lazy.ToString() }
+        });
     }
 
     private static string ComposeTranslateApiUrl(string path, string q, string from, string to, string engine,
@@ -209,11 +212,22 @@ public static class ApiClient
         return await GetDataAsync<List<MovieSearchResult>>(apiUrl, true, cancellationToken);
     }
     
-    public static async Task<List<ReviewInfo>> GetReviewsAsync(string provider, string pid,
+    public static async Task<List<ReviewInfo>> GetReviewsAsync(
+        string provider,
+        string pid,
+        bool lazy,
         CancellationToken cancellationToken)
     {
-        var apiUrl = ComposeReviewApiUrl(ReviewApi, provider, pid);
+        var apiUrl = ComposeReviewApiUrl(ReviewApi, provider, pid, lazy);
         return await GetDataAsync<List<ReviewInfo>>(apiUrl, true, cancellationToken);
+    }
+    
+    public static async Task<List<ReviewInfo>> GetReviewsAsync(
+        string provider,
+        string pid,
+        CancellationToken cancellationToken)
+    {
+        return await GetReviewsAsync(provider, pid, true /* default */, cancellationToken);
     }
 
     public static async Task<TranslationInfo> TranslateAsync(string q, string from, string to, string engine,

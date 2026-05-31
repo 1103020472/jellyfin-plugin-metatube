@@ -49,6 +49,8 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
     {
         Logger.Info("GetMetadata MovieInfo.Name: {0}", info.Name);
         var pid = info.GetPid(Name);
+        bool isNewItem = string.IsNullOrWhiteSpace(pid.Id);
+        Logger.Info("test pid:{0}", pid);
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
         {
             // Search movies and pick the first result.
@@ -59,6 +61,10 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         Logger.Info("Get movie info: {0}", pid.ToString());
 
         var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(m.Number))
+        {
+            m.Number = m.Number.ToUpperInvariant();
+        }
         
         if (m.Number != null && m.Number.StartsWith("3DSVR"))
         {
@@ -95,7 +101,8 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         }
 
 
-        if (Configuration.ReviewSwitch && pid.Provider is "FANZA")
+        var reviewProviders = new[] { "FANZA", "MGS" };
+        if (Configuration.ReviewSwitch && reviewProviders.Contains(pid.Provider))
         {
             Logger.Info("获取评论：{0}", pid.Id);
             try
@@ -139,9 +146,9 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         if (Configuration.TranslationMode != TranslationMode.Disabled)
         {
             // 开关打开，同时有中文，就跳过翻译
-            if (alreadyTranslate && Configuration.EnableCheck)
+            if (alreadyTranslate && Configuration.EnableCheck && !isNewItem)
             {
-                Logger.Info("已经是中文了，跳过翻译阶段:'{0}'.", m.Number);
+                Logger.Info("非新入库影片，且已经是中文了，跳过翻译阶段:'{0}'.", m.Number);
                 // 置为null表示不更新summary。
                 m.Summary = null;
                 if (m.Number != null)
@@ -379,8 +386,16 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
                 return;
             }
 
-            // Use the first result as the primary actor selection.
-            var firstResult = results.First();
+            // 优先选择 AV-LEAGUE
+            var preferredResult = results.FirstOrDefault(r => r.Provider == "AV-LEAGUE");
+            if (preferredResult == null)
+            {
+                Logger.Warn("没有找到AV-LEAGUE的演员元数据：{0}", actor.Name);
+            }
+
+            // 如果没有 AV-LEAGUE，则使用第一个
+            var firstResult = preferredResult ?? results.First();
+
             if (firstResult.Images?.Any() == true)
             {
                 actor.ImageUrl = ApiClient.GetPrimaryImageApiUrl(

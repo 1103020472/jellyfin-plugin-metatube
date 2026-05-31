@@ -109,7 +109,7 @@ public class UpdateReviewsTask : IScheduledTask
                     continue;
 
                 // 从远程获取最新评论
-                var remoteReviews = await ApiClient.GetReviewsAsync(pid.Provider, pid.Id, cancellationToken);
+                var remoteReviews = await ApiClient.GetReviewsAsync(pid.Provider, pid.Id, false, cancellationToken);
                 if (remoteReviews == null || !remoteReviews.Any())
                     continue;
 
@@ -117,20 +117,15 @@ public class UpdateReviewsTask : IScheduledTask
                 var newReviews = new List<ReviewInfo>();
 
                 // --------------------------------------------------------
-                // 核心逻辑 1：通过 作者 + 评论时间 作为 Key 过滤出新增评论
+                // 核心逻辑 1：通过 评论时间 作为 Key 过滤出新增评论
                 // --------------------------------------------------------
                 foreach (var review in remoteReviews)
                 {
-                    string author = string.IsNullOrWhiteSpace(review.Author) ? "匿名用户" : review.Author;
                     string commentTime = review.Date != DateTime.MinValue ? $"{review.Date:yyyy-MM-dd}" : "";
-                    
-                    // 构造和 TranslationHelper 完全一致的特征字符串进行匹配检查
-                    string keyStr = $"👤 {author}";
-                    if (!string.IsNullOrWhiteSpace(commentTime))
-                        keyStr += $" · {commentTime}";
-
-                    // 如果原数据中找不到此作者的当前评论标记，则判断为新增
-                    if (!currentOverview.Contains(keyStr))
+                    // 构造特征字符串
+                    string keyStr = $"· {commentTime}";
+                    // 如果原数据中找不到此时间标记，则判断为新增
+                    if (!string.IsNullOrWhiteSpace(commentTime) && !currentOverview.Contains(keyStr))
                     {
                         newReviews.Add(review);
                     }
@@ -140,6 +135,17 @@ public class UpdateReviewsTask : IScheduledTask
                     continue;
 
                 _logger.Info("Found {0} new reviews for movie {1} ({2})", newReviews.Count, item.Name, pid.Id);
+                
+                // foreach (var review in newReviews)
+                // {
+                //     _logger.Info(
+                //         "New review: [{0}] {1} {2} {3}",
+                //         review.Date.ToString("yyyy-MM-dd"),
+                //         review.Author,
+                //         review.Title,
+                //         review.Comment
+                //     );
+                // }
 
                 // --------------------------------------------------------
                 // 核心逻辑 2：构建“伪造”实体，仅翻译新增评论
@@ -164,6 +170,10 @@ public class UpdateReviewsTask : IScheduledTask
 
                     // 调用已有逻辑：这会将翻译并排版好的 HTML 写回 dummyInfo.Summary 中
                     await TranslationHelper.TranslateAsync(dummyInfo, targetLang, cancellationToken);
+                    
+                    // 增加换行符转换，防止第三方翻译 API 返回 \n 导致前端显示无法换行
+                    dummyInfo.Summary = ConvertNewlinesToBr(dummyInfo.Summary);
+                    
                     appendedOverviewPart = dummyInfo.Summary ?? string.Empty;
                 }
                 else
@@ -232,5 +242,21 @@ public class UpdateReviewsTask : IScheduledTask
         }
 
         progress?.Report(100);
+    }
+    
+    /// <summary>
+    /// 将原生换行符转换为 HTML 的 <br> 标签，确保在前端正常换行显示
+    /// </summary>
+    private static string ConvertNewlinesToBr(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+        {
+            return input; 
+        }
+        
+        return input
+            .Replace("\r\n", "\n")
+            .Replace("\r", "\n")
+            .Replace("\n", "<br>");
     }
 }
