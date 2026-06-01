@@ -83,6 +83,7 @@ public class UpdateReviewsTask : IScheduledTask
 #if __EMBY__
             HasAnyProviderId = new[] { Plugin.Instance.Name },
             IncludeItemTypes = new[] { nameof(Movie) },
+            AncestorIds = new long[] { 9049L, 70509L, 3L, 53977L },
 #else
             HasAnyProviderId = new Dictionary<string, string> { { Plugin.Instance.Name, string.Empty } },
             IncludeItemTypes = new[] { BaseItemKind.Movie }
@@ -221,7 +222,7 @@ public class UpdateReviewsTask : IScheduledTask
                 if (currentOverview.Contains("📝 观众评论") && appendedOverviewPart.Contains(headerPart))
                 {
                     // 替换为单个换行，使其自然追加到之前的评论下方
-                    appendedOverviewPart = appendedOverviewPart.Replace(headerPart, "<br>"); 
+                    appendedOverviewPart = appendedOverviewPart.Replace(headerPart, "<br><br>"); 
                 }
 
                 // 拼接保存
