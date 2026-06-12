@@ -109,7 +109,7 @@ public static class TranslationHelper
             {
                 // 1. 作者 + 时间
                 string author = string.IsNullOrWhiteSpace(c.Author) ? "匿名用户" : c.Author;
-                string commentTime = c.Date != DateTime.MinValue ? $"{c.Date:yyyy-MM-dd}" : "";
+                string commentTime = c.Date != DateTime.MinValue ? $"{c.Date:yyyy-MM-dd HH:mm}" : "";
                 sb.Append($"👤 {author}");
                 if (!string.IsNullOrWhiteSpace(commentTime))
                     sb.Append($" · {commentTime}");

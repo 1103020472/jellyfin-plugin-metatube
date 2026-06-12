@@ -93,6 +93,9 @@ public class UpdateReviewsTask : IScheduledTask
         // 根据 MovieProvider 的规则，只有这两家提供评论
         var reviewProviders = new[] { "FANZA", "MGS" };
         bool enableTranslation = Plugin.Instance.Configuration.TranslationMode != TranslationMode.Disabled;
+        
+        // 设定过滤策略的时间阈值
+        var timeThreshold = new DateTime(2026, 6, 11, 23, 59, 59);
 
         foreach (var (idx, item) in items.WithIndex())
         {
@@ -122,11 +125,17 @@ public class UpdateReviewsTask : IScheduledTask
                 // --------------------------------------------------------
                 foreach (var review in remoteReviews)
                 {
-                    string commentTime = review.Date != DateTime.MinValue ? $"{review.Date:yyyy-MM-dd}" : "";
+                    if (review.Date == DateTime.MinValue)
+                        continue;
+
+                    // 根据时间判断格式化策略
+                    string format = review.Date > timeThreshold ? "yyyy-MM-dd HH:mm" : "yyyy-MM-dd";
+                    string commentTime = review.Date.ToString(format);
+                    
                     // 构造特征字符串
                     string keyStr = $"· {commentTime}";
                     // 如果原数据中找不到此时间标记，则判断为新增
-                    if (!string.IsNullOrWhiteSpace(commentTime) && !currentOverview.Contains(keyStr))
+                    if (!currentOverview.Contains(keyStr))
                     {
                         newReviews.Add(review);
                     }
@@ -184,7 +193,7 @@ public class UpdateReviewsTask : IScheduledTask
                     foreach (var c in newReviews)
                     {
                         string author = string.IsNullOrWhiteSpace(c.Author) ? "匿名用户" : c.Author;
-                        string commentTime = c.Date != DateTime.MinValue ? $"{c.Date:yyyy-MM-dd}" : "";
+                        string commentTime = c.Date != DateTime.MinValue ? $"{c.Date:yyyy-MM-dd HH:mm}" : "";
                         sb.Append($"👤 {author}");
                         if (!string.IsNullOrWhiteSpace(commentTime)) sb.Append($" · {commentTime}");
                         sb.Append("<br>");
