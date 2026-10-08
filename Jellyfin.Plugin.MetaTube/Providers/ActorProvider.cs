@@ -35,15 +35,19 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
         Logger.Info("Get actor info: {0}", pid.ToString());
 
         var m = await ApiClient.GetActorInfoAsync(pid.Provider, pid.Id, cancellationToken);
-        Logger.Info("lj----------GetActorInfoAsync:{0}", m.ToString());
+        Logger.Info("Get actor info: {0} => {1} (生日 {2} / 出道 {3} / 三围 {4})",
+            pid.ToString(), m.Name,
+            m.Birthday.Year > 1 ? m.Birthday.ToString("yyyy-MM-dd") : "未知",
+            m.DebutDate.Year > 1 ? m.DebutDate.ToString("yyyy-MM-dd") : "未知",
+            m.Measurements);
 
         var result = new MetadataResult<Person>
         {
             Item = new Person
             {
                 Name = m.Name,
-                PremiereDate = m.Birthday.GetValidDateTime(),
-                ProductionYear = m.Birthday.GetValidYear(),
+                PremiereDate = GetRealBirthday(m.Birthday),
+                ProductionYear = m.Birthday.Year > 1 ? m.Birthday.Year : null,
                 Overview = FormatOverview(m)
             },
             HasMetadata = true
@@ -63,6 +67,80 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
             result.Item.ProductionLocations = new[] { m.Nationality };
 
         return result;
+    }
+
+    /// <summary>
+    /// 把服务端返回的演员资料写入一个人物条目（补齐任务使用）。
+    /// 注意：不会改名，不会清空已有的非空字段；返回是否真的写入了新内容。
+    /// </summary>
+    internal static bool ApplyActorInfo(BaseItem item, ActorInfo a)
+    {
+        var changed = false;
+
+        var overview = FormatOverview(a);
+        if (!string.IsNullOrWhiteSpace(overview) &&
+            !string.Equals(item.Overview, overview, StringComparison.Ordinal))
+        {
+            item.Overview = overview;
+            changed = true;
+        }
+
+        // 只有拿到真实年月日时才写出生日期。
+        var birthday = GetRealBirthday(a.Birthday);
+        if (birthday != null)
+        {
+            if (item.PremiereDate != birthday)
+            {
+                item.PremiereDate = birthday;
+                changed = true;
+            }
+
+            if (item.ProductionYear != birthday.Value.Year)
+            {
+                item.ProductionYear = birthday.Value.Year;
+                changed = true;
+            }
+        }
+        else if (a.Birthday.Year > 1 && item.ProductionYear != a.Birthday.Year)
+        {
+            // 只有年份（AV-LEAGUE 的占位日期），只写年份，避免凭空造出“1992-02-02”。
+            item.ProductionYear = a.Birthday.Year;
+            changed = true;
+        }
+
+        if (a.Tags != null)
+        {
+            foreach (var tag in a.Tags.Where(tag => !string.IsNullOrWhiteSpace(tag)))
+            {
+                if (item.Tags != null && item.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+                    continue;
+
+                item.AddTag(tag);
+                changed = true;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(a.Nationality) && item.ProductionLocations == null)
+        {
+            item.ProductionLocations = new[] { a.Nationality };
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    /// <summary>
+    /// AV-LEAGUE 部分演员只公布出生年份（例如 天ヶ瀬ゆか 的页面写的是「1992年（34歳）」），
+    /// 服务端用 2月2日 02:02:02 做占位（见服务端 provider/av-league/av-league.go 的 parseDate）。
+    /// 注意：该值存进服务端数据库后时间部分会被规整成 00:00:00，
+    /// 所以只按「2月2日」判断，不能依赖时分秒。
+    /// 这种占位日期不能当成真实生日写入，否则会凭空造出「1992-02-02」。
+    /// </summary>
+    internal static DateTime? GetRealBirthday(DateTime birthday)
+    {
+        if (birthday.Year <= 1) return null;
+        if (birthday.Month == 2 && birthday.Day == 2) return null;
+        return birthday;
     }
 
     public async Task<IEnumerable<RemoteSearchResult>> GetSearchResults(
@@ -113,11 +191,18 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
     {
         var aliases = a.Aliases?.Where(alias => !string.Equals(alias, a.Name, StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase);
-        
+
+        // AV-LEAGUE 只公布出生年份时，日期字段是占位值，这里退化成“生年”。
+        var birthday = GetRealBirthday(a.Birthday);
+        var birthText = birthday != null
+            ? birthday.Value.ToString("yyyy年M月d日")
+            : a.Birthday.Year > 1 ? $"{a.Birthday.Year}年" : string.Empty;
+
         // lj-替换为中文标签
         var info = new List<(string, string)>
         {
             ("別名", string.Join(", ", aliases ?? Enumerable.Empty<string>())),
+            ("出生", birthText),
             ("三围", a.Measurements),
             ("罩杯", a.CupSize),
             ("身高", a.Height > 0 ? $"{a.Height}cm" : string.Empty),

@@ -39,7 +39,13 @@ public class ActorImageProvider : BaseProvider, IRemoteImageProvider, IHasOrder
         if (actorInfo.Images?.Any() != true)
             return Enumerable.Empty<RemoteImageInfo>();
 
-        return actorInfo.Images.Select(image => new RemoteImageInfo
+        // 服务端会为日语演员注入 Gfriends 图片且放在列表最前面，
+        // 这里把 AV-LEAGUE 自己的头像排到最前，保证自动下载时优先使用 AV-LEAGUE 的头像。
+        var images = actorInfo.Images
+            .OrderByDescending(image => image.Contains("av-league.com", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        return images.Select(image => new RemoteImageInfo
         {
             ProviderName = Name,
             Type = ImageType.Primary,

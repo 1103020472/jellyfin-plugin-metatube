@@ -28,6 +28,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
 #endif
 {
     private const string AvBase = "AVBASE";
+    private const string AvLeague = "AV-LEAGUE";
     private const string Gfriends = "Gfriends";
     private const string Rating = "JP-18+";
 
@@ -387,27 +388,39 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             }
 
             // 优先选择 AV-LEAGUE
-            var preferredResult = results.FirstOrDefault(r => r.Provider == "AV-LEAGUE");
+            var preferredResult = results.FirstOrDefault(r =>
+                string.Equals(r.Provider, AvLeague, StringComparison.OrdinalIgnoreCase));
             if (preferredResult == null)
             {
-                Logger.Warn("没有找到AV-LEAGUE的演员元数据：{0}", actor.Name);
+                Logger.Warn("没有找到AV-LEAGUE的演员元数据：{0}（服务端返回的 provider：{1}）",
+                    actor.Name, string.Join(", ", results.Select(r => r.Provider).Distinct()));
             }
 
-            // 如果没有 AV-LEAGUE，则使用第一个
+            // 如果没有 AV-LEAGUE，则使用第一个（服务端已按 provider 优先级降序排序）
             var firstResult = preferredResult ?? results.First();
 
             if (firstResult.Images?.Any() == true)
             {
                 actor.ImageUrl = ApiClient.GetPrimaryImageApiUrl(
                     firstResult.Provider, firstResult.Id, firstResult.Images.First(), 0.5, true);
-                actor.SetPid(Name, firstResult.Provider, firstResult.Id);
             }
 
-            // Use the Gfriends to update the actor profile image, if any.
-            foreach (var result in results.Where(result => result.Provider == Gfriends && result.Images?.Any() == true))
+            // 无论是否有图片都要记录来源，否则人物的元数据刷新无法定位到 AV-LEAGUE。
+            if (!string.IsNullOrWhiteSpace(firstResult.Provider) && !string.IsNullOrWhiteSpace(firstResult.Id))
             {
-                actor.ImageUrl = ApiClient.GetPrimaryImageApiUrl(
-                    result.Provider, result.Id, result.Images.First(), 0.5, true);
+                actor.SetPid(Name, firstResult.Provider, firstResult.Id);
+                Logger.Info("演员元数据来源：{0} => {1}:{2}", actor.Name, firstResult.Provider, firstResult.Id);
+            }
+
+            // Gfriends 仅作为兜底：AV-LEAGUE 已经给出头像时不再覆盖，否则“优先 AV-LEAGUE”会被这里覆盖掉。
+            if (preferredResult?.Images?.Any() != true)
+            {
+                foreach (var result in results.Where(result => result.Provider == Gfriends && result.Images?.Any() == true))
+                {
+                    actor.ImageUrl = ApiClient.GetPrimaryImageApiUrl(
+                        result.Provider, result.Id, result.Images.First(), 0.5, true);
+                    Logger.Info("演员头像回退到 Gfriends：{0}", actor.Name);
+                }
             }
         }
         catch (Exception e)

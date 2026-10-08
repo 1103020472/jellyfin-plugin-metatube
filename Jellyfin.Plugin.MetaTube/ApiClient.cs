@@ -3,9 +3,9 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Web;
 using Jellyfin.Plugin.MetaTube.Metadata;
-using MediaBrowser.Model.Logging;
 #if __EMBY__
 using MediaBrowser.Common.Net;
+using MediaBrowser.Model.Logging;
 #endif
 
 namespace Jellyfin.Plugin.MetaTube;

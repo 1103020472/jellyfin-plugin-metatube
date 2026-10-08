@@ -149,7 +149,9 @@ public static class TranslationHelper
         if (Configuration.TranslationMode.HasFlag(TranslationMode.Summary) && !string.IsNullOrWhiteSpace(m.Summary))
         {
             summaryChunks = SplitText(m.Summary, Configuration.MaxChunkSize);
+#if __EMBY__
             Plugin.Instance.logger.Info("摘要分片数量: {0}", summaryChunks.Count);
+#endif
             foreach (var (chunk, index) in summaryChunks.Select((chunk, idx) => (chunk, idx)))
             {
                 summaryTasks.Add(TranslateAsync(chunk, AutoLanguageCode, to, m.Id, index + 1, cancellationToken));
@@ -162,7 +164,9 @@ public static class TranslationHelper
         {
             // 评论内容也按最大分片大小切割，和摘要完全一样
             reviewChunks = SplitText(reviewHtmlContent, Configuration.MaxChunkSize);
+#if __EMBY__
             Plugin.Instance.logger.Info("评论HTML分片数量: {0}", reviewChunks.Count);
+#endif
 
             var reviewTasks = new List<Task<string>>();
             foreach (var (chunk, index) in reviewChunks.Select((chunk, idx) => (chunk, idx)))

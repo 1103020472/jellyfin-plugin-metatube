@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -240,8 +240,9 @@ public class UpdateReviewsTask : IScheduledTask
 #if __EMBY__
                 item.UpdateToRepository(ItemUpdateType.MetadataEdit);
 #else
-                // Jellyfin 更新接口适配（如遇版本过高 API 变动，替换为 _libraryManager.UpdateItem 即可）
-                item.UpdateToRepository(ItemUpdateType.MetadataEdit);
+                // Jellyfin 没有 BaseItem.UpdateToRepository，改用 ILibraryManager 更新。
+                await _libraryManager.UpdateItemAsync(
+                    item, item.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken);
 #endif
                 _logger.Info("Successfully updated reviews for movie {0}", item.Name);
             }
