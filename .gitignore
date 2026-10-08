@@ -173,3 +173,6 @@ riderModule.iml
 # Msic
 .DS_Store
 *.zip
+
+# Rider personal settings
+*.DotSettings.user
