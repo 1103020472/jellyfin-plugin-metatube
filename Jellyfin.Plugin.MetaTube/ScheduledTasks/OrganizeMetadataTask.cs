@@ -81,29 +81,21 @@ public class OrganizeMetadataTask : IScheduledTask
 
             var genres = item.Genres?.ToList() ?? new List<string>();
 
-            // 添加中文字幕标签
-            string zimu = string.Empty;;
-            string umr = string.Empty;
+            // 1. 处理中文字幕标签 (只负责增删 List 中的元素)
             try
             {
-                switch (HasEmbeddedChineseSubtitle(item.FileNameWithoutExtension) ||
-                        HasExternalChineseSubtitle(item.Path))
+                bool hasZimu = HasEmbeddedChineseSubtitle(item.FileNameWithoutExtension) ||
+                               HasExternalChineseSubtitle(item.Path);
+                
+                if (hasZimu && !genres.Contains(ChineseSubtitle))
                 {
-                    // Add `ChineseSubtitle` genre.
-                    case true when !genres.Contains(ChineseSubtitle):
-                    {
-                        _logger.Info("添加中文字幕标签 for video: {0}", item.Name);
-                        genres.Add(ChineseSubtitle);
-                        zimu = Plugin.Instance.Configuration.BadgeUrl;
-                        break;
-                    }
-                    // Remove `ChineseSubtitle` genre.
-                    case false when genres.Contains(ChineseSubtitle):
-                    {
-                        _logger.Info("删除中文字幕标签 for video: {0}", item.Name);
-                        genres.RemoveAll(s => s.Equals(ChineseSubtitle));
-                        break;
-                    }
+                    _logger.Info("添加中文字幕标签 for video: {0}", item.Name);
+                    genres.Add(ChineseSubtitle);
+                }
+                else if (!hasZimu && genres.Contains(ChineseSubtitle))
+                {
+                    _logger.Info("删除中文字幕标签 for video: {0}", item.Name);
+                    genres.RemoveAll(s => s.Equals(ChineseSubtitle));
                 }
             }
             catch (Exception e)
@@ -111,26 +103,19 @@ public class OrganizeMetadataTask : IScheduledTask
                 _logger.Error("Update ChineseSubtitle for video {0}: {1}", item.Name, e.Message);
             }
             
-            // lj-添加无码标签
+            // 2. 处理无码标签 (只负责增删 List 中的元素)
             try
             {
-                switch (HasUmrFile(item.Path))
+                bool hasUmr = HasUmrFile(item.Path);
+                if (hasUmr && !genres.Contains(UmrGenre))
                 {
-                    //case true:
-                    case true  when !genres.Contains(UmrGenre):
-                    {
-                        _logger.Info("添加无码标签 for video: {0}", item.Name);
-                        genres.Add(UmrGenre);
-                        // 先写死，暂时不做配置化
-                        umr = "umr.png";
-                        break;
-                    }
-                    case false when genres.Contains(UmrGenre):
-                    {
-                        _logger.Info("删除无码标签 for video: {0}", item.Name);
-                        genres.RemoveAll(s => s.Equals(UmrGenre));
-                        break;
-                    }
+                    _logger.Info("添加无码标签 for video: {0}", item.Name);
+                    genres.Add(UmrGenre);
+                }
+                else if (!hasUmr && genres.Contains(UmrGenre))
+                {
+                    _logger.Info("删除无码标签 for video: {0}", item.Name);
+                    genres.RemoveAll(s => s.Equals(UmrGenre));
                 }
             }
             catch (Exception e)
@@ -138,25 +123,32 @@ public class OrganizeMetadataTask : IScheduledTask
                 _logger.Error("Update WuMaGenre for video {0}: {1}", item.Name, e.Message);
             }
 
-            // Remove duplicates.
+            // 3. 去重和应用替换规则
             var orderedGenres =
                 (Plugin.Instance.Configuration.EnableGenreSubstitution
-                    // Substitute genres.
                     ? Plugin.Instance.Configuration.GetGenreSubstitutionTable().Substitute(genres)
                     : genres).Distinct().OrderByString(genre => genre).ToList();
 
-            // Skip updating item if equal.
+            // 4. 检查是否需要更新标签
             var currentGenres = item.Genres?.OrderByString(g => g).ToList() ?? new List<string>();
-            if (!orderedGenres.Any() ||
-                (currentGenres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false))
+            bool genresChanged = orderedGenres.Any() && 
+                                 !(currentGenres?.SequenceEqual(orderedGenres, StringComparer.OrdinalIgnoreCase)).GetValueOrDefault(false);
+
+            if (!genresChanged)
+            {
+                // 如果标签没变，直接跳过处理下一部影片
                 continue;
+            }
 
-            //_logger.Info("需要刷新标签，old={0}, new={1}", string.Join(", ", currentGenres), string.Join(", ", orderedGenres));  
+            // 更新标签
             item.Genres = orderedGenres.ToArray();
-
             _logger.Info("Organize metadata for video: {0}", item.Name);
             
-            // 只要认为需要更新标签，就同步修改图片
+            // 5. 【关键修复】基于最终确定的 orderedGenres 来决定水印变量！
+            string zimu = orderedGenres.Contains(ChineseSubtitle) ? Plugin.Instance.Configuration.BadgeUrl : string.Empty;
+            string umr = orderedGenres.Contains(UmrGenre) ? "umr.png" : string.Empty;
+
+            // 6. 同步修改图片
             try
             {
                 if (Plugin.Instance.Configuration.EnableBadges)
