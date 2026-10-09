@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
     'use strict';
 
     // =========================================================
@@ -41,6 +41,36 @@
     ];
 
     // =========================
+    // Emby 系统菜单识别
+    //   右上角头像弹出的「应用设置 / 管理 Emby Server」菜单不属于任何媒体条目，
+    //   绝不能往里插「复制番号」等自定义按钮。
+    //   （症状：菜单里冒出一个“复制番号 (用户名)”，因为系统菜单没有条目预览标题，
+    //   兜底取到的正是用户名。）
+    //
+    //   精确识别这一条系统菜单专属入口：
+    //     <div class="listItemBodyText actionSheetItemText listItemBodyText-lf">管理 Emby Server</div>
+    //   条目动作菜单不会出现它，命中即判定。
+    // =========================
+    const SYSTEM_MENU_ANCHOR_SELECTOR = '.listItemBodyText.actionSheetItemText';
+    const SYSTEM_MENU_ANCHOR_RE = /^\s*管理\s*Emby\s*Server\s*$/i;
+
+    // 标题预览节点（列表页卡片 / 详情页菜单都会有），它带的是条目信息
+    function getPreviewText() {
+        const el = document.querySelector('.actionsheetPreviewTextItem');
+        return el?.textContent?.trim() || '';
+    }
+
+    function isSystemMenu(container) {
+        if (!container) return false;
+
+        const anchors = container.querySelectorAll(SYSTEM_MENU_ANCHOR_SELECTOR);
+        for (const el of anchors) {
+            if (SYSTEM_MENU_ANCHOR_RE.test(el.textContent || '')) return true;
+        }
+        return false;
+    }
+
+    // =========================
     // 获取ItemId (修复在列表页无法获取ID的问题)
     // =========================
     function getItemId() {
@@ -73,20 +103,22 @@
 
     // =========================
     // 提取番号
+    //   只认条目预览标题，并且要求标题里存在分隔结构（ABP-123 / ABP_123 / ABP 123）。
+    //   绝不再用页面文本兜底：系统菜单取不到标题时会读到用户名，纯字母数字的用户名
+    //   会被旧正则匹配成“番号”。分隔符必需可以挡住裸用户名（如 Administrator）。
     // =========================
     function extractCode(title) {
         if (!title) return '';
-        title = title.toUpperCase();
-        const match = title.match(/\b([A-Z]{2,10})[-_ ]?(\d{2,6})\b/);
+        title = `${title}`.toUpperCase();
+        const match = title.match(/\b([A-Z]{2,10})[-_ ](\d{2,6})\b/);
         return match ? `${match[1]}-${match[2]}` : '';
     }
 
     // =========================
-    // 获取标题
+    // 获取标题（仅条目动作菜单的预览标题）
     // =========================
     function getTitle() {
-        const el = document.querySelector('.actionsheetPreviewTextItem');
-        return el?.textContent?.trim() || '';
+        return getPreviewText();
     }
 
     // =========================
@@ -350,6 +382,12 @@
         const container = document.querySelector('.actionsheetScrollSlider');
         if (!container) return;
 
+        // 系统菜单（含「管理 Emby Server」入口）一律不注入，并把可能残留的自定义按钮清掉
+        if (isSystemMenu(container)) {
+            document.querySelectorAll('.actionsheetScrollSlider').forEach(removeInjectedButtons);
+            return;
+        }
+
         const contextKey = menuContextKey();
 
         // 同一个条目、按钮还在 => 不重复注入；
@@ -366,6 +404,12 @@
 
         const currentContainer = document.querySelector('.actionsheetScrollSlider');
         if (!currentContainer) return;
+
+        // 请求期间用户可能切换到系统菜单 / 关闭菜单，这里再确认一次
+        if (isSystemMenu(currentContainer)) {
+            document.querySelectorAll('.actionsheetScrollSlider').forEach(removeInjectedButtons);
+            return;
+        }
 
         const title = getTitle();
 
