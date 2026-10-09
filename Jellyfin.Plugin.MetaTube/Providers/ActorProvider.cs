@@ -1,5 +1,6 @@
 using Jellyfin.Plugin.MetaTube.Extensions;
 using Jellyfin.Plugin.MetaTube.Metadata;
+using Jellyfin.Plugin.MetaTube.Translation;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Providers;
@@ -14,6 +15,26 @@ namespace Jellyfin.Plugin.MetaTube.Providers;
 
 public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, PersonLookupInfo>, IHasOrder
 {
+    /// <summary>
+    /// 人物 Overview 里简介段落的标签。定时任务靠它判断"已经有简介"，
+    /// 已经有（中文）简介的人物不再重复翻译。
+    /// </summary>
+    internal const string BioLabel = "简介: ";
+
+    /// <summary>
+    /// 人物 Overview 的格式版本标记（HTML 注释，展示时不可见）。
+    /// 演员资料的解析逻辑升级后，定时任务靠它判断该人物是否需要强制重抓一次源站
+    /// （例如 av-wiki 简介是后加的内容，旧记录里没有），抓到后标记会写进 Overview，
+    /// 之后就不再强制抓源站。升级解析逻辑时把这个数字 +1 即可全量刷新一次。
+    /// </summary>
+    internal const string OverviewMarker = "<!-- metatube-actor:2 -->";
+
+    /// <summary>
+    /// 紧跟在简介后面的标记（HTML 注释，展示时不可见）：表示这段简介已经翻译过。
+    /// 定时任务靠它判断是否需要翻译，保证幂等、不重复消耗翻译 token。
+    /// </summary>
+    internal const string BioTranslatedMarker = "<!-- metatube-bio:zh -->";
+
 #if __EMBY__
     public ActorProvider(ILogManager logManager) : base(logManager.CreateLogger<ActorProvider>())
 #else
@@ -40,6 +61,9 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
             m.Birthday.Year > 1 ? m.Birthday.ToString("yyyy-MM-dd") : "未知",
             m.DebutDate.Year > 1 ? m.DebutDate.ToString("yyyy-MM-dd") : "未知",
             m.Measurements);
+
+        // 演员简介（av-wiki）原文是日文，翻译成中文后再写进 Overview。
+        await TranslateActorBio(m, info.MetadataLanguage, cancellationToken);
 
         var result = new MetadataResult<Person>
         {
@@ -72,6 +96,7 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
     /// <summary>
     /// 把服务端返回的演员资料写入一个人物条目（补齐任务使用）。
     /// 注意：不会改名，不会清空已有的非空字段；返回是否真的写入了新内容。
+    /// 简介由调用方决定（翻译后的、或保留的旧简介），这里只负责写进 Overview。
     /// </summary>
     internal static bool ApplyActorInfo(BaseItem item, ActorInfo a)
     {
@@ -212,7 +237,78 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
             ("Instagram", a.Instagram)
         };
 
-        return string.Join("\n<br>\n",
+        var overview = string.Join("\n<br>\n",
             info.Where(kvp => !string.IsNullOrWhiteSpace(kvp.Item2)).Select(kvp => $"{kvp.Item1}: {kvp.Item2}"));
+
+        // 演员简介（服务端 summary 字段，来自 av-wiki，已翻译成中文）放在结构化信息之后。
+        if (!string.IsNullOrWhiteSpace(a.Summary))
+        {
+            overview += $"\n<br>\n<br>\n{BioLabel}{ConvertNewlinesToBr(a.Summary.Trim())}";
+            if (a.SummaryTranslated) overview += BioTranslatedMarker;
+        }
+
+        // 版本标记：定时任务靠它判断是否需要强制重抓一次源站（见 OverviewMarker）。
+        return overview + "\n" + OverviewMarker;
+    }
+
+    /// <summary>
+    /// 从人物 Overview 里取出已经写入的简介（没有则返回 null）。
+    /// </summary>
+    internal static string ExtractBio(string overview)
+    {
+        if (string.IsNullOrWhiteSpace(overview)) return null;
+
+        var start = overview.IndexOf(BioLabel, StringComparison.Ordinal);
+        if (start < 0) return null;
+        start += BioLabel.Length;
+
+        var end = overview.Length;
+        foreach (var marker in new[] { BioTranslatedMarker, OverviewMarker })
+        {
+            var index = overview.IndexOf(marker, start, StringComparison.Ordinal);
+            if (index >= 0 && index < end) end = index;
+        }
+
+        var bio = overview.Substring(start, end - start).Trim();
+        return string.IsNullOrWhiteSpace(bio) ? null : bio;
+    }
+
+    /// <summary>
+    /// 人物 Overview 里的简介是否已经翻译过。
+    /// </summary>
+    internal static bool IsBioTranslated(string overview)
+    {
+        return !string.IsNullOrWhiteSpace(overview) &&
+               overview.Contains(BioTranslatedMarker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 翻译演员简介（av-wiki 原文为日文）。只在还没翻译时翻译，失败时保留原文。
+    /// </summary>
+    private async Task TranslateActorBio(ActorInfo m, string language, CancellationToken cancellationToken)
+    {
+        if (!TranslationHelper.NeedsTranslation(m.Summary)) return;
+
+        try
+        {
+            var start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            await TranslationHelper.TranslateActorAsync(m, language, cancellationToken);
+            Logger.Info("Translate actor bio end, cost:{0}ms: {1} => {2}",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, m.Id, language);
+        }
+        catch (Exception e)
+        {
+            Logger.Error("Translate actor bio error: {0}", e.Message);
+        }
+    }
+
+    private static string ConvertNewlinesToBr(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return input;
+
+        return input
+            .Replace("\r\n", "\n")
+            .Replace("\r", "\n")
+            .Replace("\n", "<br>");
     }
 }

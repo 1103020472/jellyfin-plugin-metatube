@@ -46,4 +46,11 @@ public class ActorInfo : ActorSearchResult
 
     [JsonPropertyName("summary")]
     public string Summary { get; set; }
+
+    /// <summary>
+    /// 客户端内部标记：简介是否已经翻译过（不参与 JSON）。
+    /// 用来保证定时任务幂等 —— 已经翻译过的简介不再重复请求翻译接口。
+    /// </summary>
+    [JsonIgnore]
+    public bool SummaryTranslated { get; set; }
 }

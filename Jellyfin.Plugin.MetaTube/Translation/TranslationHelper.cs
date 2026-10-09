@@ -231,6 +231,166 @@ public static class TranslationHelper
         m.Summary = finalSummary;
     }
     
+    #region 演员简介
+
+    /// <summary>
+    /// 演员简介翻译的目标语言：优先用条目的元数据语言，没有则用简体中文
+    /// （与 UpdateReviewsTask 保持一致）。
+    /// </summary>
+    private const string DefaultActorTargetLanguage = "zh-CN";
+
+    /// <summary>
+    /// 日文假名（平假名 / 片假名）。av-wiki 的演员简介原文是日文，
+    /// 翻译成中文后一般不再含假名。
+    /// </summary>
+    private static readonly Regex JapaneseKanaRegex =
+        new(@"[\u3040-\u309F\u30A0-\u30FF]", RegexOptions.Compiled);
+
+    /// <summary>
+    /// 批量翻译时用来分隔不同演员简介的标记。纯符号标记翻译引擎 / 大模型都会原样保留，
+    /// 万一被改坏（见 <see cref="TryApplyBatchResult"/>）会退回逐个翻译。
+    /// </summary>
+    private static readonly Regex BatchMarkerRegex = new(@"\[\[\s*(\d+)\s*\]\]", RegexOptions.Compiled);
+
+    /// <summary>
+    /// 简介是否需要翻译：空文本不需要；不像日文的文本（例如已经翻译好的中文）也不需要。
+    /// 是否"已经翻译过"由 <see cref="ActorInfo.SummaryTranslated"/> 标记决定（更精确）。
+    /// </summary>
+    public static bool NeedsTranslation(string text)
+    {
+        return !string.IsNullOrWhiteSpace(text) && JapaneseKanaRegex.IsMatch(text);
+    }
+
+    /// <summary>
+    /// 是否开启了简介翻译（复用现有的 TranslationMode 开关）。
+    /// </summary>
+    private static bool ActorTranslationEnabled =>
+        Configuration.TranslationMode.HasFlag(TranslationMode.Summary);
+
+    /// <summary>
+    /// 翻译单个演员的简介（刮削单个演员时使用，没有批量的余地）。
+    /// </summary>
+    public static async Task TranslateActorAsync(ActorInfo actor, string language,
+        CancellationToken cancellationToken)
+    {
+        if (actor == null) return;
+        await TranslateActorSummariesAsync(new[] { actor }, language, cancellationToken);
+    }
+
+    /// <summary>
+    /// 批量翻译演员简介：把多个演员的简介拼成一次请求，节省（AI 翻译的）token。
+    /// 只会翻译 <see cref="NeedsTranslation"/> 为真且有简介的演员，其余原样保留。
+    /// </summary>
+    public static async Task TranslateActorSummariesAsync(IReadOnlyList<ActorInfo> actors, string language,
+        CancellationToken cancellationToken)
+    {
+        if (!ActorTranslationEnabled || actors == null || actors.Count == 0) return;
+
+        var to = ResolveActorTargetLanguage(language);
+        if (to == null) return; // 目标语言就是日文，无需翻译。
+
+        var targets = actors
+            .Where(actor => actor != null && !actor.SummaryTranslated && NeedsTranslation(actor.Summary))
+            .ToList();
+        if (targets.Count == 0) return;
+
+        // 按 MaxChunkSize 分组：同一批演员的简介合并成一次请求。
+        foreach (var batch in SplitActorBatches(targets, Configuration.MaxChunkSize))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (batch.Count == 1)
+            {
+                var actor = batch[0];
+                actor.Summary = await TranslateAsync(actor.Summary, AutoLanguageCode, to, actor.Id, 0,
+                    cancellationToken);
+                actor.SummaryTranslated = true;
+                continue;
+            }
+
+            // 形如：[[1]] 简介1\n[[2]] 简介2
+            var payload = string.Join("\n",
+                batch.Select((actor, index) => $"[[{index + 1}]] {actor.Summary}"));
+            var translated = await TranslateAsync(payload, AutoLanguageCode, to, "actor-summaries", 0,
+                cancellationToken);
+
+            if (!TryApplyBatchResult(translated, batch))
+            {
+                // 标记被翻译引擎改坏时，退回逐个翻译，避免串行 / 丢内容。
+                foreach (var actor in batch)
+                {
+                    actor.Summary = await TranslateAsync(actor.Summary, AutoLanguageCode, to, actor.Id, 0,
+                        cancellationToken);
+                    actor.SummaryTranslated = true;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 把演员简介按最大分片大小分组，保证单次请求不会过长。
+    /// </summary>
+    private static List<List<ActorInfo>> SplitActorBatches(IReadOnlyList<ActorInfo> actors, int maxChunkSize)
+    {
+        var limit = maxChunkSize > 0 ? maxChunkSize : 2000;
+        var batches = new List<List<ActorInfo>>();
+        var current = new List<ActorInfo>();
+        var length = 0;
+
+        foreach (var actor in actors)
+        {
+            var itemLength = actor.Summary.Length + 16; // 16 为标记与换行的余量。
+            if (current.Count > 0 && length + itemLength > limit)
+            {
+                batches.Add(current);
+                current = new List<ActorInfo>();
+                length = 0;
+            }
+
+            current.Add(actor);
+            length += itemLength;
+        }
+
+        if (current.Count > 0) batches.Add(current);
+        return batches;
+    }
+
+    /// <summary>
+    /// 按 [[n]] 标记把批量翻译结果拆回各个演员。标记数量或顺序对不上时返回 false，
+    /// 由调用方退回逐个翻译。
+    /// </summary>
+    private static bool TryApplyBatchResult(string translated, IReadOnlyList<ActorInfo> batch)
+    {
+        var matches = BatchMarkerRegex.Matches(translated ?? string.Empty);
+        if (matches.Count != batch.Count) return false;
+
+        for (var i = 0; i < matches.Count; i++)
+        {
+            if (int.TryParse(matches[i].Groups[1].Value, out var index) && index != i + 1) return false;
+
+            var start = matches[i].Index + matches[i].Length;
+            var end = i + 1 < matches.Count ? matches[i + 1].Index : translated.Length;
+            var text = translated.Substring(start, end - start).Trim();
+            if (string.IsNullOrWhiteSpace(text)) return false;
+
+            batch[i].Summary = text;
+            batch[i].SummaryTranslated = true;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// 解析简介翻译的目标语言；为空或就是日文时返回 null（表示无需翻译）。
+    /// </summary>
+    private static string ResolveActorTargetLanguage(string language)
+    {
+        var to = string.IsNullOrWhiteSpace(language) ? DefaultActorTargetLanguage : language.Trim();
+        return string.Equals(to, JapaneseLanguageCode, StringComparison.OrdinalIgnoreCase) ? null : to;
+    }
+
+    #endregion
+
     private static List<string> SplitText(string text, int maxChunkSize)
     {
         var chunks = new List<string>();
