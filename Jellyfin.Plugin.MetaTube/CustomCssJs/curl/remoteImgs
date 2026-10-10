@@ -1,0 +1,7 @@
+﻿curl --url 'http://av.emby.cv.local/emby/Items/3196/RemoteImages?Type=Primary&Limit=50&X-Emby-Client=Emby+Web&X-Emby-Device-Name=embyToLocalPlayer&X-Emby-Device-Id=356a3988-3fce-4f06-9494-3e7dba0d84c6&X-Emby-Client-Version=4.9.0.42&X-Emby-Token=739b6172911e4ecaa816a7bee85e1119&X-Emby-Language=zh-cn' \
+  -H 'Accept-Language: zh-CN,zh;q=0.9,en;q=0.8' \
+  -H 'Connection: keep-alive' \
+  -H 'Referer: http://av.emby.cv.local/web/index.html' \
+  -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36' \
+  -H 'accept: application/json' \
+  --insecure
