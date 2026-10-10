@@ -202,6 +202,21 @@ public class PluginConfiguration : BasePluginConfiguration
 #endif
     public string OpenAiModel { get; set; } = string.Empty;
 
+#if __EMBY__
+    [DisplayName("OpenAI extra params (JSON)")]
+    [Description("Extra JSON fields merged into the chat completion request body. To cut cost/latency on SiliconFlow reasoning models use {\"thinking_budget\": 1} (verified: reasoning tokens 1154 -> 2, 13s -> 1.3s). Other gateways differ, e.g. Zhipu {\"thinking\": {\"type\": \"disabled\"}}, vLLM {\"chat_template_kwargs\": {\"enable_thinking\": false}}.")]
+    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public string OpenAiExtraParams { get; set; } = string.Empty;
+
+    // 单次请求最多生成的 token 数（含思维链）。默认 4096，0 表示使用默认值。
+#if __EMBY__
+    [DisplayName("OpenAI max completion tokens")]
+    [Description("Upper bound of generated tokens per request (including reasoning). Default 4096.")]
+    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public int OpenAiMaxCompletionTokens { get; set; } = 4096;
+
     // 翻译时最大传输的文字个数，避免一次性传太多需要AI翻译很久
 #if __EMBY__
     [DisplayName("Translation MaxChunkSize")]

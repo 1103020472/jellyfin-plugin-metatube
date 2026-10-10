@@ -56,7 +56,9 @@ public static class TranslationHelper
                 {
                     { "openai-api-key", Configuration.OpenAiApiKey },
                     { "openai-api-url", Configuration.OpenAiApiUrl },
-                    { "openai-model", Configuration.OpenAiModel }
+                    { "openai-model", Configuration.OpenAiModel },
+                    { "openai-extra-params", Configuration.OpenAiExtraParams },
+                    { "openai-max-completion-tokens", Configuration.OpenAiMaxCompletionTokens.ToString() }
                 });
                 break;
             default:
