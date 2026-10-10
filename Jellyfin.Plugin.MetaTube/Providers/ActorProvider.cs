@@ -55,7 +55,15 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
 
         Logger.Info("Get actor info: {0}", pid.ToString());
 
-        var m = await ApiClient.GetActorInfoAsync(pid.Provider, pid.Id, cancellationToken);
+        // pid.Update 为 true 时表示"本次要强制回源站重抓"（由条目上的 provider id 携带，
+        // 见 ProviderId.Update）。这正是媒体服务器点"刷新元数据"时会走到的路径：
+        // 服务器只会带上条目里已有的 provider id，所以强制刷新必须靠这个标记传递。
+        // 另外配置项 EnableForceRefetch 打开后，任何一次元数据刷新都强制回源站。
+        // 标记是一次性的：抓完在下面写回 update: false，避免以后每次刷新都回源站。
+        var forceRefetch = pid.Update == true || Configuration.EnableForceRefetch;
+        if (forceRefetch) Logger.Info("Force refetch actor from source site: {0}", pid.ToString());
+
+        var m = await ApiClient.GetActorInfoAsync(pid.Provider, pid.Id, !forceRefetch, cancellationToken);
         Logger.Info("Get actor info: {0} => {1} (生日 {2} / 出道 {3} / 三围 {4})",
             pid.ToString(), m.Name,
             m.Birthday.Year > 1 ? m.Birthday.ToString("yyyy-MM-dd") : "未知",
@@ -84,7 +92,9 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
         }
 
         // Set ProviderIdModel.
-        result.Item.SetPid(Name, m.Provider, m.Id);
+        // update: false —— 强制重抓标记已经消费掉，落库后下次刷新回归 lazy 抓取。
+        // 只在本次确实是强制重抓时才写，避免平白改变已有条目的 provider id 字符串。
+        result.Item.SetPid(Name, m.Provider, m.Id, update: forceRefetch ? false : pid.Update);
 
         // Set actor nationality.
         if (!string.IsNullOrWhiteSpace(m.Nationality))

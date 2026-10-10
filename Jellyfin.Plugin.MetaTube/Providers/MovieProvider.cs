@@ -61,7 +61,13 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
 
         Logger.Info("Get movie info: {0}", pid.ToString());
 
-        var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, cancellationToken);
+        // pid.Update 为 true 时表示"本次要强制回源站重抓"（见 ProviderId.Update）。
+        // 另外配置项 EnableForceRefetch 打开后，任何一次元数据刷新都强制回源站。
+        // 标记是一次性的：抓完在下面写回 update: false。
+        var forceRefetch = pid.Update == true || Configuration.EnableForceRefetch;
+        if (forceRefetch) Logger.Info("Force refetch movie from source site: {0}", pid.ToString());
+
+        var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, !forceRefetch, cancellationToken);
         if (!string.IsNullOrWhiteSpace(m.Number))
         {
             m.Number = m.Number.ToUpperInvariant();
@@ -213,7 +219,8 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         };
 
         // Set provider id.
-        result.Item.SetPid(Name, m.Provider, m.Id, pid.Position);
+        // update: false —— 强制重抓标记已经消费掉，落库后下次刷新回归 lazy 抓取。
+        result.Item.SetPid(Name, m.Provider, m.Id, pid.Position, forceRefetch ? false : pid.Update);
 
         // Set trailer url.
         var trailerUrl = !string.IsNullOrWhiteSpace(m.PreviewVideoUrl)

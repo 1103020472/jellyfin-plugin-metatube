@@ -219,6 +219,16 @@ public class PluginConfiguration : BasePluginConfiguration
     [DisplayName("Show Reviews")]
 #endif
     public bool ReviewSwitch { get; set; } = false;
+
+    /// <summary>
+    /// 打开后，"刷新元数据"（以及补齐任务发现资料缺失时）会携带 update: true，
+    /// 强制服务端回源站重抓，而不是用服务端缓存（lazy=true）。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Enable force refetch")]
+    [Description("Refresh metadata forces the server to refetch from the source site instead of using its cache.")]
+#endif
+    public bool EnableForceRefetch { get; set; } = false;
     
 #if __EMBY__
     [DisplayName("Enable title substitution")]

@@ -251,6 +251,13 @@
                                 </label>
                                 <div class="fieldDescription checkboxFieldDescription"></div>
                             </div>
+                            <div class="checkboxContainer checkboxContainer-withDescription">
+                                <label class="emby-checkbox-label">
+                                    <input id="chkEnableForceRefetch" is="emby-checkbox" name="chkEnableForceRefetch" type="checkbox"/>
+                                    <span>刷新元数据时强制回源站（关闭则使用服务端缓存）</span>
+                                </label>
+                                <div class="fieldDescription checkboxFieldDescription">打开后，媒体服务器"刷新元数据"会携带 update=true，让服务端重新抓取源站（lazy=false），而不是直接返回缓存。</div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -390,6 +397,7 @@
                 $('#txtMaxChunkSize', page).val(config.MaxChunkSize).change();
                 page.querySelector('#chkEnableCheck').checked = config.EnableCheck;
                 page.querySelector('#chkReviewSwitch').checked = config.ReviewSwitch;
+                page.querySelector('#chkEnableForceRefetch').checked = config.EnableForceRefetch;
                 page.querySelector('#chkEnableTitleSubstitution').checked = config.EnableTitleSubstitution;
                 $('#txtTitleRawSubstitutionTable', page).val(config.TitleRawSubstitutionTable).change();
                 page.querySelector('#chkEnableActorSubstitution').checked = config.EnableActorSubstitution;
@@ -434,6 +442,7 @@
                 config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
                 config.EnableCheck = $('#chkEnableCheck', form).prop('checked');
                 config.ReviewSwitch = $('#chkReviewSwitch', form).prop('checked');
+                config.EnableForceRefetch = $('#chkEnableForceRefetch', form).prop('checked');
                 config.EnableTitleSubstitution = $('#chkEnableTitleSubstitution', form).prop('checked');
                 config.TitleRawSubstitutionTable = $('#txtTitleRawSubstitutionTable', form).val();
                 config.EnableActorSubstitution = $('#chkEnableActorSubstitution', form).prop('checked');
