@@ -1,4 +1,4 @@
-﻿class CommonUtils {
+class CommonUtils {
     static loadExtastyle(content, id) {
         let style = document.createElement("style");
         style.type = "text/css";
@@ -54,6 +54,35 @@ class HomeSwiper {
             });
 
         }
+        /* 清除首页轮播图缓存：getLibItems 存在 localStorage，getItems 存在 sessionStorage */
+        function clearSwiperCache(page) {
+            let userId = ApiClient.getCurrentUserId();
+            let serverId = ApiClient.serverId();
+            let libItemsKey = "CACHE|getLibItems_v2" + userId + "-" + serverId;
+            let itemKeySuffix = userId + "-" + serverId;
+
+            // 1. 清除 localStorage 中的媒体库聚合缓存
+            localStorage.removeItem(libItemsKey);
+            // 2. 清除 localStorage 中的每日刷新日期标记
+            localStorage.removeItem("CACHE|Movies-Date");
+            // 3. 清除 sessionStorage 中所有 getItems 明细缓存（按 ParentId 分片存储）
+            Object.keys(sessionStorage)
+                .filter(key => key.startsWith("CACHE|getItems_v2") && key.endsWith(itemKeySuffix))
+                .forEach(key => sessionStorage.removeItem(key));
+
+            // 复位运行期标记，保证返回首页时重新拉取
+            HomeSwiper.loadFlag = false;
+            HomeSwiper.cacheRefreshFlag = false;
+            HomeSwiper.Alldata = null;
+            // 若首页元素仍在 DOM 中（缓存视图），一并移除，强制重新构建
+            document.querySelector(".mySwiper-main")?.closest(".verticalSection")?.remove();
+
+            require(["toast"], function (toast) {
+                toast("缓存已清除，返回首页将重新获取影片");
+            });
+            page && console.info("[HomeSwiper] 轮播图缓存已清除");
+        }
+
         function renderMediaFolders(page, user, mediaFolders) {
 
             var html =
@@ -172,6 +201,15 @@ class HomeSwiper {
                             </button>
                         </div>
 						<br />
+                        <div class="folderAccessContainer">
+                            <h2>轮播图缓存</h2>
+                            <div class="fieldDescription">清除已缓存的轮播影片数据，重新进入首页时会重新从媒体库随机获取影片展示。</div>
+                            <br />
+                            <button is="emby-button" type="button" class="clearSwiperCacheButton raised button-cancel block">
+                                <span>清除轮播图缓存</span>
+                            </button>
+                        </div>
+						<br />
 						</div>`;
                         var view = e.target;
                         view.children[0].children[0].insertAdjacentHTML('afterbegin', selectHomePhotoCarouselHtml);
@@ -198,6 +236,17 @@ class HomeSwiper {
                             function (e) {
                                 return (
                                     saveUser(this, view),
+                                        e.preventDefault(),
+                                        e.stopPropagation(),
+                                        !1
+                                );
+                            }.bind(this));
+
+                        view.querySelector(".clearSwiperCacheButton").addEventListener(
+                            "click",
+                            function (e) {
+                                return (
+                                    clearSwiperCache(view),
                                         e.preventDefault(),
                                         e.stopPropagation(),
                                         !1
