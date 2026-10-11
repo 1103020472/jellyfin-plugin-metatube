@@ -293,7 +293,15 @@ public static class ApiClient
             // Connection Pooling.
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
             PooledConnectionIdleTimeout = TimeSpan.FromSeconds(90)
-        });
+        })
+        {
+            // 整体请求超时（含等待服务端响应）。HttpClient 的默认值是 100 秒，
+            // 而翻译走的是大模型：单次摘要/评论分片在推理模型上可能要几十秒到数分钟，
+            // 默认值会导致 "The request was canceled due to the configured
+            // HttpClient.Timeout of 100 seconds elapsing" 而整段翻译失败。
+            // 这里放宽到 10 分钟（连接超时仍由上面的 ConnectTimeout 单独控制，30 秒）。
+            Timeout = TimeSpan.FromMinutes(10)
+        };
     }
 
     #endregion

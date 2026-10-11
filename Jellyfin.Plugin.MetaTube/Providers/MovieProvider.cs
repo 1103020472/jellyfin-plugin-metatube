@@ -51,7 +51,6 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         Logger.Info("GetMetadata MovieInfo.Name: {0}", info.Name);
         var pid = info.GetPid(Name);
         bool isNewItem = string.IsNullOrWhiteSpace(pid.Id);
-        Logger.Info("test pid:{0}", pid);
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
         {
             // Search movies and pick the first result.

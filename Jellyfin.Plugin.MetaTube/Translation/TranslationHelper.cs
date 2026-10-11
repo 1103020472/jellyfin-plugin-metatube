@@ -15,6 +15,90 @@ public static class TranslationHelper
 
     private static PluginConfiguration Configuration => Plugin.Instance.Configuration;
 
+    #region 源语言判定
+
+    /// <summary>
+    /// 汉字 / (汉字 + 假名) 达到该比例时，认为是「无假名的中文」。
+    /// 与 <see cref="ChineseRatioThreshold"/> 同源，用于识别已翻译文本。
+    /// </summary>
+    private const double HanOnlyChineseThreshold = 0.9;
+
+    /// <summary>
+    /// 推断请求正文的源语言，替代一律使用 "auto"。
+    ///
+    /// 背景（实测于 SDK + SiliconFlow DeepSeek-V4-Flash）：
+    /// "auto" 会让 SDK 走 "Please translate the following text into Chinese:" 分支
+    /// （见 SDK openai.go 的 lookupLanguage(source)=="auto"），不告诉模型源语言是什么，
+    /// 且目标语言是唯一语境。模型因此把「REbecca STARS13-The marvels-」这类
+    /// 「英文词 + 番号」混杂的短串当成一个待处理任务，进而：
+    ///   1) 输出整段英文思维链（"The user wants me to translate..."）当作译文；
+    ///   2) 把 The marvels 误判成漫威 IP，译成「漫威 / 惊奇队长2」。
+    /// 实测给定源语言后行为显著收敛（from=en → 「奇迹」，from=ja → 直译）。
+    ///
+    /// 这里只做高置信度的粗判，拿不准时仍退回 "auto"（保持原有行为，不做无根据猜测）。
+    /// </summary>
+    private static string DetectSourceLanguage(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return AutoLanguageCode;
+
+        // 1. 有假名 → 日文。日文标题常混有大量汉字与拉丁字母，
+        //    只有假名是日文独有的强特征，所以这一条必须排在最前。
+        if (JapaneseKanaRegex.IsMatch(text)) return JapaneseLanguageCode;
+
+        // 2. 有汉字且汉字占比很高、又无假名 → 视为中文（无需翻译，源语言与目标一致）。
+        if (CountHan(text) > 0 && HanRatio(text) >= HanOnlyChineseThreshold) return "zh-CN";
+
+        // 3. 形如番号（VRKM-01234 / 3DSVR00123 / MBDD-2076 / NO.1）的纯目录 token：
+        //    没有自然语言可翻译，交回引擎自动识别，避免把番号当英文送去翻译
+        //    （否则模型会试图解释 "STARS13" 的含义，产出思维链）。
+        if (IsCatalogNumber(text)) return AutoLanguageCode;
+
+        // 4. 有拉丁字母但无假名 → 多为英文标题 / 英文词混番号，按英文处理。
+        if (text.Any(c => c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z')) return "en";
+
+        // 5. 其余（纯数字 / 纯符号 / 纯韩文等）无法判断，交回引擎自动识别。
+        return AutoLanguageCode;
+    }
+
+    /// <summary>
+    /// 判断整段文本是否只是一个"番号形状"的目录 token（VRKM-01234 / 3DSVR00123 /
+    /// MBDD-2076 / STARS13 / NO.1）。
+    ///
+    /// 判定依据：整段只有一个「字母块」，且数字紧跟在它后面（可含 - _ 空格分隔）。
+    /// 真正的自然语言标题总会有多个单词（如 "STARS13-The marvels-" 有 marvels），
+    /// 因此不会被误判。用于避免把番号当英文送去翻译。
+    /// </summary>
+    private static bool IsCatalogNumber(string text)
+    {
+        var t = text.Trim();
+        if (t.Length == 0 || !t.Any(char.IsDigit)) return false;
+
+        // 统计"字母块"数量：连续的拉丁字母记作一块。
+        var blocks = 0;
+        var inBlock = false;
+        var digitSeen = false;
+
+        foreach (var c in t)
+        {
+            var isLatin = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z';
+            if (isLatin)
+            {
+                if (!inBlock) { blocks++; inBlock = true; }
+            }
+            else
+            {
+                inBlock = false;
+                if (char.IsDigit(c)) digitSeen = true;
+            }
+        }
+
+        // 只有一个字母块 + 含数字 → 番号形状（STARS13、VRKM-01234、NO.1）。
+        // 注意 "STARS13-The marvels-" 有两个字母块，不在此列。
+        return digitSeen && blocks <= 1;
+    }
+
+    #endregion
+
     private static async Task<string> TranslateAsync(string q, string from, string to, string title, int chunkIndex,
         CancellationToken cancellationToken)
     {
@@ -82,7 +166,7 @@ public static class TranslationHelper
             }
 
             var context = $"{title}#{chunkIndex}({q?.Length ?? 0}chars)";
-            return await RetryAsync(TranslateWithDelay, 5, context, cancellationToken);
+            return await RetryAsync(TranslateWithDelay, 1, context, cancellationToken);
         }
         finally
         {
@@ -144,7 +228,10 @@ public static class TranslationHelper
         // --- 1. 标题翻译 ---
         if (Configuration.TranslationMode.HasFlag(TranslationMode.Title) && !string.IsNullOrWhiteSpace(m.Title))
         {
-            titleTask = TranslateAsync(m.Title, AutoLanguageCode, to, m.Id, 0, cancellationToken);
+            // 标题是短文本、且经常是「英文词 + 番号」混杂，最容易触发模型的"元思考"，
+            // 因此这里必须给出明确的源语言，不能放任 auto（见 DetectSourceLanguage 注释）。
+            var titleFrom = DetectSourceLanguage(m.Title);
+            titleTask = TranslateAsync(m.Title, titleFrom, to, m.Id, 0, cancellationToken);
         }
 
         // --- 2. 摘要翻译（分片）---
@@ -157,7 +244,7 @@ public static class TranslationHelper
 #endif
             foreach (var (chunk, index) in summaryChunks.Select((chunk, idx) => (chunk, idx)))
             {
-                summaryTasks.Add(TranslateAsync(chunk, AutoLanguageCode, to, m.Id, index + 1, cancellationToken));
+                summaryTasks.Add(TranslateAsync(chunk, DetectSourceLanguage(chunk), to, m.Id, index + 1, cancellationToken));
             }
         }
 
@@ -175,7 +262,7 @@ public static class TranslationHelper
             foreach (var (chunk, index) in reviewChunks.Select((chunk, idx) => (chunk, idx)))
             {
                 // taskId 从 5000 开始，避免和其他任务冲突
-                reviewTasks.Add(TranslateAsync(chunk, AutoLanguageCode, to, m.Id, 5000 + index, cancellationToken));
+                reviewTasks.Add(TranslateAsync(chunk, DetectSourceLanguage(chunk), to, m.Id, 5000 + index, cancellationToken));
             }
 
             // 等待评论所有分片完成，合并成完整翻译后的 HTML
@@ -243,11 +330,12 @@ public static class TranslationHelper
     private const string DefaultActorTargetLanguage = "zh-CN";
 
     /// <summary>
-    /// 日文假名（平假名 / 片假名）。av-wiki 的演员简介原文是日文，
+    /// 日文假名（平假名 / 片假名 / 半角片假名）。av-wiki 的演员简介原文是日文，
     /// 翻译成中文后一般不再含假名。
+    /// 也用于 <see cref="DetectSourceLanguage"/> 判定源语言。
     /// </summary>
     private static readonly Regex JapaneseKanaRegex =
-        new(@"[\u3040-\u309F\u30A0-\u30FF]", RegexOptions.Compiled);
+        new(@"[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\uFF66-\uFF9D]", RegexOptions.Compiled);
 
     /// <summary>
     /// 批量翻译时用来分隔不同演员简介的标记。纯符号标记翻译引擎 / 大模型都会原样保留，
@@ -416,7 +504,7 @@ public static class TranslationHelper
             if (batch.Count == 1)
             {
                 var actor = batch[0];
-                actor.Summary = await TranslateAsync(actor.Summary, AutoLanguageCode, to, actor.Id, 0,
+                actor.Summary = await TranslateAsync(actor.Summary, DetectSourceLanguage(actor.Summary), to, actor.Id, 0,
                     cancellationToken);
                 actor.SummaryTranslated = true;
                 continue;
@@ -425,7 +513,7 @@ public static class TranslationHelper
             // 形如：[[1]] 简介1\n[[2]] 简介2
             var payload = string.Join("\n",
                 batch.Select((actor, index) => $"[[{index + 1}]] {actor.Summary}"));
-            var translated = await TranslateAsync(payload, AutoLanguageCode, to, "actor-summaries", 0,
+            var translated = await TranslateAsync(payload, DetectSourceLanguage(payload), to, "actor-summaries", 0,
                 cancellationToken);
 
             if (!TryApplyBatchResult(translated, batch))
@@ -433,8 +521,8 @@ public static class TranslationHelper
                 // 标记被翻译引擎改坏时，退回逐个翻译，避免串行 / 丢内容。
                 foreach (var actor in batch)
                 {
-                    actor.Summary = await TranslateAsync(actor.Summary, AutoLanguageCode, to, actor.Id, 0,
-                        cancellationToken);
+                    actor.Summary = await TranslateAsync(actor.Summary, DetectSourceLanguage(actor.Summary), to,
+                        actor.Id, 0, cancellationToken);
                     actor.SummaryTranslated = true;
                 }
             }
