@@ -72,16 +72,17 @@ public static class TranslationHelper
             async Task<string> TranslateWithDelay()
             {
                 await Task.Delay(millisecondsDelay, cancellationToken);
-                //Plugin.Instance.logger.Info("Translating start {0}: {1}", title, chunkIndex);
                 var start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 var translationInfo = await ApiClient
                     .TranslateAsync(q, from, to, Configuration.TranslationEngine.ToString(), nv, cancellationToken)
                     .ConfigureAwait(false);
-                //Plugin.Instance.logger.Info("Translating end, cost:{0}ms {1}: {2}", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, title, chunkIndex);
+                LogInfo("Translating {0}#{1} end, cost:{2}ms, chars:{3}", title, chunkIndex,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, q?.Length ?? 0);
                 return translationInfo.TranslatedText;
             }
 
-            return await RetryAsync(TranslateWithDelay, 5);
+            var context = $"{title}#{chunkIndex}({q?.Length ?? 0}chars)";
+            return await RetryAsync(TranslateWithDelay, 5, context, cancellationToken);
         }
         finally
         {
@@ -442,17 +443,64 @@ public static class TranslationHelper
         return chunks;
     }
 
-    private static async Task<T> RetryAsync<T>(Func<Task<T>> func, int retryCount)
+    // 服务端在响应被 max_completion_tokens 截断时返回的错误标记（见 SDK 的 openai.go）。
+    private static readonly Regex TruncationErrorRegex =
+        new(@"truncated by max_completion_tokens", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static void LogInfo(string format, params object[] args)
     {
-        while (true)
+#if __EMBY__
+        try { Plugin.Instance.logger.Info(format, args); } catch { /* logging must never break translation */ }
+#endif
+    }
+
+    private static void LogWarn(string format, params object[] args)
+    {
+#if __EMBY__
+        try { Plugin.Instance.logger.Warn(format, args); } catch { }
+#endif
+    }
+
+    /// <summary>
+    /// 带日志与指数退避的重试。截断类错误直接抛出（重试无意义），
+    /// 取消请求立刻放弃，其余错误按退避重试。
+    /// </summary>
+    private static async Task<T> RetryAsync<T>(Func<Task<T>> func, int retryCount, string context,
+        CancellationToken cancellationToken)
+    {
+        var delayMs = 500;
+        for (var attempt = 1; ; attempt++)
         {
             try
             {
                 return await func();
             }
-            catch when (--retryCount > 0)
+            catch (OperationCanceledException)
             {
+                // 用户取消刮削，继续重试没有意义。
+                throw;
+            }
+            catch (Exception e) when (IsNonRetryable(e) || attempt >= retryCount)
+            {
+                LogWarn("Translate give up ({0}) after {1} attempt(s): {2}", context, attempt, e.Message);
+                throw;
+            }
+            catch (Exception e)
+            {
+                LogWarn("Translate attempt {0}/{1} failed ({2}), retrying in {3}ms: {4}", attempt, retryCount, context,
+                    delayMs, e.Message);
+                await Task.Delay(delayMs, cancellationToken);
+                delayMs = Math.Min(delayMs * 2, 8000); // cap backoff at 8s.
             }
         }
+    }
+
+    /// <summary>
+    /// 判断是否为「重试也不会变好」的错误（例如被 max_completion_tokens 截断：
+    /// 重试结果完全一样，只会白烧一遍 token）。
+    /// </summary>
+    private static bool IsNonRetryable(Exception e)
+    {
+        return e.Message != null && TruncationErrorRegex.IsMatch(e.Message);
     }
 }

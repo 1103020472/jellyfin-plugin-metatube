@@ -233,7 +233,7 @@
             box.appendChild(img);
             card.appendChild(box);
 
-            card.addEventListener('click', () => openLightbox(photos, index));
+            card.addEventListener('click', () => openLightbox(itemId, photos, index));
             row.appendChild(card);
         });
 
@@ -244,7 +244,7 @@
 
     // ---------------- 灯箱 ----------------
 
-    function openLightbox(photos, startIndex) {
+    function openLightbox(itemId, photos, startIndex) {
         closeLightbox();
 
         const root = document.createElement('div');
@@ -289,7 +289,7 @@
         root.addEventListener('click', (e) => { if (e.target === root) closeLightbox(); });
         document.addEventListener('keydown', onKeydown);
 
-        lightbox = { root, onKeydown };
+        lightbox = { root, onKeydown, itemId };
         render();
     }
 
@@ -303,38 +303,104 @@
 
     // ---------------- 主流程 ----------------
 
-    function removeAllSections(exceptContainer) {
+    // 判断一个详情视图当前是否真正可见。
+    // Emby 切换条目时会把旧视图（display:none）短暂甚至长期留在 DOM 里做返回栈，
+    // document.querySelector 会命中排在前面的旧视图，绝不能往隐藏视图里插区块。
+    function isViewVisible(view) {
+        if (!view) return false;
+        const cs = getComputedStyle(view);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+        const rect = view.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    // 枚举当前可见的详情视图，返回 [{ add, detailId }]
+    function getVisibleDetailViews() {
+        const candidates = Array.from(document.querySelectorAll('.details-additionalContent'));
+        const list = [];
+        for (const add of candidates) {
+            const view = add.closest('.view,[data-role="page"]');
+            if (!isViewVisible(view)) continue;
+            const detailId = view.querySelector('.detailImageContainerCard')?.dataset.id || null;
+            list.push({ add, detailId });
+        }
+        return list;
+    }
+
+    // 决定当前应当处理的目标：{ container, itemId } 或 null。
+    //
+    // 关键：不能只认 location.hash。从影片详情页底部演员列表点演员时，
+    // Emby 走 appRouter 内部视图栈（showItem），新演员视图已经显示，
+    // 但 URL hash 仍停留在上一个影片（实测确认）。因此：
+    //   1) 可见视图封面卡 data-id 与 hash 一致 → 常规 hash 路由，用它；
+    //   2) 只有一个可见详情视图 → 直接以视图自身的 data-id 为准（覆盖内部栈导航）；
+    //   3) 多个可见视图且都不匹配 hash（过渡动画中）→ 返回 null 等下一波。
+    function resolveTarget() {
+        const visible = getVisibleDetailViews();
+        if (!visible.length) return null;
+
+        const hashId = currentItemId();
+        const exact = hashId ? visible.find(v => v.detailId === hashId) : null;
+        if (exact) return { container: exact.add, itemId: exact.detailId };
+
+        if (visible.length === 1 && visible[0].detailId) {
+            return { container: visible[0].add, itemId: visible[0].detailId };
+        }
+        return null;
+    }
+
+    function removeAllSections() {
+        document.querySelectorAll(`.${SECTION_CLASS}`).forEach(node => node.remove());
+    }
+
+    // 清掉插到隐藏 / 已失效视图里的区块（页面切换过渡期的错位注入）
+    function purgeStaleSections() {
         document.querySelectorAll(`.${SECTION_CLASS}`).forEach(node => {
-            if (!exceptContainer || node.parentNode !== exceptContainer) node.remove();
+            const view = node.closest('.view,[data-role="page"]');
+            if (!view) { node.remove(); return; }
+            if (!isViewVisible(view)) node.remove();
         });
     }
 
     async function tick() {
         const myToken = ++tickToken;
         const api = getApi();
-        const itemId = currentItemId();
-        const container = document.querySelector('.details-additionalContent');
 
-        // 不在条目详情页：清掉可能残留的区块和灯箱
-        if (!api || !itemId || !container) {
+        // 未登录 / ApiClient 不可用：清掉可能残留的区块和灯箱
+        if (!api) {
             removeAllSections();
             closeLightbox();
             return;
         }
 
+        // 先清掉隐藏视图里的错位区块
+        purgeStaleSections();
+
+        const target = resolveTarget();
+
+        // 目标视图还没渲染好 / 处于过渡动画：本轮不动，等下一波观察器触发
+        if (!target) return;
+
+        const { container, itemId } = target;
+
+        // 灯箱是给上一个条目开的（内部栈导航 hash 不变、没有 hashchange）：关掉
+        if (lightbox && lightbox.itemId && lightbox.itemId !== itemId) closeLightbox();
+
         // 已为当前演员渲染过则跳过
         const existing = container.querySelector(`.${SECTION_CLASS}`);
         if (existing && existing.dataset.actorPhotosFor === itemId) return;
-
-        // 路由切换：先移除其它容器 / 旧条目残留的区块
-        removeAllSections(container);
+        if (existing) existing.remove();
 
         if (!(await isPerson(api, itemId))) {
             if (myToken !== tickToken) return;
-            removeAllSections();
+            // 非人物条目：确保该视图没有区块
+            const t2 = resolveTarget();
+            if (t2 && t2.itemId === itemId) {
+                t2.container.querySelector(`.${SECTION_CLASS}`)?.remove();
+            }
             return;
         }
-        if (myToken !== tickToken || currentItemId() !== itemId) return;
+        if (myToken !== tickToken) return;
 
         let photos;
         try {
@@ -344,29 +410,45 @@
             return;
         }
 
-        // 请求期间路由可能已切换
-        if (myToken !== tickToken || currentItemId() !== itemId) return;
+        // 请求期间视图可能已切换
+        if (myToken !== tickToken) return;
         if (!photos.length) return;
 
-        const freshContainer = document.querySelector('.details-additionalContent');
-        if (!freshContainer) return;
+        // 插入前重新解析目标，避免落到过渡动画中的旧视图
+        const fresh = resolveTarget();
+        if (!fresh || fresh.itemId !== itemId) return;
 
-        const duplicated = freshContainer.querySelector(`.${SECTION_CLASS}`);
+        const duplicated = fresh.container.querySelector(`.${SECTION_CLASS}`);
         if (duplicated && duplicated.dataset.actorPhotosFor === itemId) return;
         if (duplicated) duplicated.remove();
 
         const section = buildSection(itemId, photos);
         // 封面信息区（.topDetailsContainer）结束后，additionalContent 的第一个位置：
         // 视觉上即「封面下面、影片上面」
-        freshContainer.insertBefore(section, freshContainer.firstChild);
+        fresh.container.insertBefore(section, fresh.container.firstChild);
     }
 
     function init() {
+        // 防止脚本被重复加载时初始化两遍（多实例会互相删区块导致闪烁）
+        if (window.__actorPhotosInited) { tick(); return; }
+        window.__actorPhotosInited = true;
+
         injectStyles();
 
         const scheduledTick = debounce(tick, 120);
         const observer = new MutationObserver(scheduledTick);
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+        // childList 覆盖内容渲染；attributes 覆盖视图切换时旧视图加 display:none / 移除 active class
+        observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class', 'style']
+        });
+        // 挂到 window 上保持强引用，避免 observer 被垃圾回收后页面不再响应
+        window.__actorPhotosObserver = observer;
+
+        // 兜底：每秒轻量检查一次，任何没被 observer/hashchange 覆盖到的页面变化都能收敛
+        window.setInterval(tick, 1000);
 
         window.addEventListener('hashchange', () => { closeLightbox(); tick(); });
         window.addEventListener('popstate', () => { closeLightbox(); tick(); });
