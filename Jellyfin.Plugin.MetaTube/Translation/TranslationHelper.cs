@@ -11,7 +11,7 @@ public static class TranslationHelper
     private const string AutoLanguageCode = "auto";
     private const string JapaneseLanguageCode = "ja";
 
-    private static readonly SemaphoreSlim Semaphore = new(10);
+    private static readonly SemaphoreSlim Semaphore = new(5);
 
     private static PluginConfiguration Configuration => Plugin.Instance.Configuration;
 

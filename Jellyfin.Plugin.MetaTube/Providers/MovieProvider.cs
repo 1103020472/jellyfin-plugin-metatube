@@ -76,7 +76,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         if (m.Number != null && m.Number.StartsWith("3DSVR"))
         {
             m.Number = m.Number.Replace("3DSVR", "DSVR");
-            Logger.Info("--------LJ---------统一番号名：{0}", m.Number);    
+            Logger.Info("Unified movie number: {0}", m.Number);
         }
         
         // 新增规则：处理 DSVR 或 VRKM 开头的番号，格式化数字部分
@@ -102,7 +102,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
                 if (newNumber != m.Number)
                 {
                     m.Number = newNumber;
-                    Logger.Info("--------LJ---------格式化番号数字：{0}", m.Number);
+                    Logger.Info("Formatted movie number: {0}", m.Number);
                 }
             }
         }
@@ -334,7 +334,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
                         break;
                     }
                 }
-                Logger.Info("---------LJ--------修改番号名：{0}", searchName);
+                Logger.Info("修改番号名：{0}", searchName);
             }
 
             searchResults.AddRange(await ApiClient.SearchMovieAsync(searchName, pid.Provider, cancellationToken));

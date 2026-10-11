@@ -54,6 +54,60 @@
     const SYSTEM_MENU_ANCHOR_SELECTOR = '.listItemBodyText.actionSheetItemText';
     const SYSTEM_MENU_ANCHOR_RE = /^\s*管理\s*Emby\s*Server\s*$/i;
 
+    // =========================
+    // 「版本」媒体源选择菜单识别
+    //   点击详情页/播放信息里的「版本」下拉（普通 / 4K / 60fps …）时，Emby 也会用
+    //   同一个 actionsheet 容器渲染选项菜单；而详情页 URL 带 ?id=，getItemInfo()
+    //   照样能拿到 Item，导致「打开 MetaTube / 打开演员」错误地出现在版本菜单里。
+    //
+    //   这种菜单的条目 data-id 就是 select option 的 value（如 mediasource_84431），
+    //   且条目文本能和页面上 label 为「版本」的 select 的选项文本对上，命中即判定。
+    // =========================
+    const MEDIA_SOURCE_MENU_RE = /^mediasource_\d+$/i;
+
+    function getLabeledSelectOptions(labelRe) {
+        const result = [];
+        document.querySelectorAll('select.emby-select').forEach(function (select) {
+            const label = select.getAttribute('label') || '';
+            const wrapperLabel = select.closest('.selectLabel')?.querySelector('.selectLabelText')?.textContent || '';
+            if (!labelRe.test(label) && !labelRe.test(wrapperLabel)) return;
+            select.querySelectorAll('option').forEach(function (opt) {
+                const text = (opt.textContent || '').trim();
+                if (text) result.push(text);
+            });
+        });
+        return result;
+    }
+
+    function isMediaSourceMenu(container) {
+        if (!container) return false;
+
+        const items = container.querySelectorAll('[data-id]');
+        if (!items.length) return false;
+
+        let hasMediaSourceId = false;
+        const itemTexts = [];
+        items.forEach(function (el) {
+            if (MEDIA_SOURCE_MENU_RE.test(el.getAttribute('data-id') || '')) {
+                hasMediaSourceId = true;
+            }
+            const text = el.textContent || '';
+            if (text.trim()) itemTexts.push(text.trim());
+        });
+
+        // 强信号：条目本身就是 mediasource_* 选项
+        if (hasMediaSourceId) return true;
+
+        // 兜底：条目文本与「版本」下拉的选项完全重合（不同皮肤/版本下 data-id 可能缺失）
+        if (!itemTexts.length) return false;
+        const versionOptions = getLabeledSelectOptions(/版本|edition|version/i);
+        if (!versionOptions.length) return false;
+
+        return itemTexts.every(function (text) {
+            return versionOptions.indexOf(text) >= 0;
+        });
+    }
+
     // 标题预览节点（列表页卡片 / 详情页菜单都会有），它带的是条目信息
     function getPreviewText() {
         const el = document.querySelector('.actionsheetPreviewTextItem');
@@ -383,7 +437,7 @@
         if (!container) return;
 
         // 系统菜单（含「管理 Emby Server」入口）一律不注入，并把可能残留的自定义按钮清掉
-        if (isSystemMenu(container)) {
+        if (isSystemMenu(container) || isMediaSourceMenu(container)) {
             document.querySelectorAll('.actionsheetScrollSlider').forEach(removeInjectedButtons);
             return;
         }
@@ -406,7 +460,7 @@
         if (!currentContainer) return;
 
         // 请求期间用户可能切换到系统菜单 / 关闭菜单，这里再确认一次
-        if (isSystemMenu(currentContainer)) {
+        if (isSystemMenu(currentContainer) || isMediaSourceMenu(currentContainer)) {
             document.querySelectorAll('.actionsheetScrollSlider').forEach(removeInjectedButtons);
             return;
         }
