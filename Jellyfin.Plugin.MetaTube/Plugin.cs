@@ -18,10 +18,17 @@ namespace Jellyfin.Plugin.MetaTube;
 public class Plugin : BasePluginSimpleUI<PluginConfiguration>, IHasThumbImage
 {
     public readonly ILogger logger;
-    
+
+    /// <summary>
+    /// 应用宿主。自定义 API 服务（Api/ReviewService）需要通过它解析
+    /// ILibraryManager 等依赖，而 Emby 对插件自定义服务不保证构造注入。
+    /// </summary>
+    public IApplicationHost ApplicationHost { get; }
+
     public Plugin(IApplicationHost applicationHost) : base(applicationHost)
     {
         Instance = this;
+        ApplicationHost = applicationHost;
         this.logger = applicationHost.Resolve<ILogManager>().GetLogger(this.Name);
     }
 #else

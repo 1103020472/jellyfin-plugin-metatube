@@ -320,7 +320,122 @@ public static class TranslationHelper
         // 最终回写到 Summary
         m.Summary = finalSummary;
     }
-    
+
+    /// <summary>
+    /// 只翻译评论的结果。
+    /// </summary>
+    public sealed class ReviewTranslationResult
+    {
+        /// <summary>翻译并排版好的评论 HTML（含 📝 观众评论 表头），失败时为空。</summary>
+        public string Html { get; set; }
+
+        /// <summary>实际切出的分片数。</summary>
+        public int ChunkCount { get; set; }
+    }
+
+    /// <summary>
+    /// 只翻译 <see cref="MovieInfo.Reviews"/>，返回可直接追加到 Overview 的 HTML 片段。
+    ///
+    /// 与 <see cref="TranslateAsync(MovieInfo, string, CancellationToken)"/> 里的评论分支保持
+    /// 完全一致的拼接格式、分片方式与源语言判定，区别仅是：
+    ///   * 不碰标题 / 摘要（按需拉评论时不应该重写简介）；
+    ///   * 通过 <paramref name="onProgress"/> 回报分片完成情况，供 Emby 详情页按钮显示。
+    ///
+    /// 分片是并发翻译的（<c>Task.WhenAll</c>），所以进度是「已完成 N/M 片」的离散量，
+    /// 不是时间比例 —— 可能长时间停在 0，然后一次性跳到 M。
+    /// </summary>
+    public static async Task<ReviewTranslationResult> TranslateReviewsAsync(
+        MovieInfo m,
+        string to,
+        Action<string, int, int, int> onProgress,
+        CancellationToken cancellationToken)
+    {
+        var result = new ReviewTranslationResult { Html = string.Empty };
+        if (m?.Reviews == null || !m.Reviews.Any())
+            return result;
+
+        // ---- 第一步：先拼评论 HTML 结构（不翻译）----
+        var sb = new StringBuilder();
+        foreach (var c in m.Reviews)
+        {
+            var author = string.IsNullOrWhiteSpace(c.Author) ? "匿名用户" : c.Author;
+            var commentTime = c.Date != DateTime.MinValue ? $"{c.Date:yyyy-MM-dd HH:mm}" : "";
+            sb.Append($"👤 {author}");
+            if (!string.IsNullOrWhiteSpace(commentTime))
+                sb.Append($" · {commentTime}");
+            sb.Append("<br>");
+
+            var score = Math.Clamp(c.Score, 0, 5);
+            var starIcon = $"{new string('⭐', score)}{new string('☆', 5 - score)}";
+            var commentTitle = string.IsNullOrWhiteSpace(c.Title) ? "" : c.Title;
+            if (!string.IsNullOrWhiteSpace(starIcon) || !string.IsNullOrWhiteSpace(commentTitle))
+                sb.Append($"<b>{starIcon} {commentTitle}</b><br>");
+
+            if (!string.IsNullOrWhiteSpace(c.Comment))
+                sb.Append($"{c.Comment}<br>");
+
+            sb.Append("<br><br>");
+        }
+
+        var reviewHtmlContent = sb.ToString();
+
+        // ---- 第二步：分片 + 并发翻译 ----
+        var reviewChunks = SplitText(reviewHtmlContent, Configuration.MaxChunkSize);
+        result.ChunkCount = reviewChunks.Count;
+        LogInfo("按需拉取评论：分片数量 {0}", reviewChunks.Count);
+
+        onProgress?.Invoke("translating", 0, reviewChunks.Count, m.Reviews.Count());
+
+        var finished = 0;
+        var totalChunks = reviewChunks.Count;
+        var reviewTasks = new List<Task<string>>();
+        foreach (var (chunk, index) in reviewChunks.Select((chunk, idx) => (chunk, idx)))
+        {
+            // taskId 从 5000 开始，避免和其他任务冲突（与批量翻译保持一致）
+            reviewTasks.Add(TranslateChunkWithProgress(
+                chunk, to, m.Id, 5000 + index, totalChunks,
+                () =>
+                {
+                    var done = Interlocked.Increment(ref finished);
+                    onProgress?.Invoke("translating", done, totalChunks, m.Reviews.Count());
+                },
+                cancellationToken));
+        }
+
+        var translatedReviewChunks = await Task.WhenAll(reviewTasks);
+        var translatedReviewHtml = string.Join("<br>", translatedReviewChunks);
+
+        if (string.IsNullOrWhiteSpace(translatedReviewHtml))
+            return result;
+
+        // ---- 第三步：加上评论区表头（与 UpdateReviewsTask 完全一致）----
+        var header = new StringBuilder();
+        header.Append("<br><br>");
+        header.Append("————————————————————————————<br>");
+        header.Append("<font color=\"#fce83a\" size=\"4\"><b>📝 观众评论</b></font><br>");
+        header.Append("<br>");
+
+        result.Html = header + translatedReviewHtml;
+        return result;
+    }
+
+    /// <summary>
+    /// 翻译单个分片，并在完成后回调一次（无论成功失败），用于汇总「已完成 N/M 片」。
+    /// </summary>
+    private static async Task<string> TranslateChunkWithProgress(
+        string chunk, string to, string title, int chunkIndex, int totalChunks,
+        Action onFinished, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await TranslateAsync(chunk, DetectSourceLanguage(chunk), to, title, chunkIndex, cancellationToken);
+        }
+        finally
+        {
+            onFinished?.Invoke();
+        }
+    }
+
     #region 演员简介
 
     /// <summary>
