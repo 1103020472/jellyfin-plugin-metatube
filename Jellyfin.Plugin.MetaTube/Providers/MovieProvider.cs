@@ -303,7 +303,22 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         {
             // Search movie by name.
             Logger.Info("Search for movie: {0}", info.Name);
-            
+
+            // 诊断：确认 Emby 究竟传了什么。若 Name 已被截断（如 MBDD）而 Year 为 null，
+            // 说明数字在客户端就被丢掉了，需要在下面用其它兜底手段还原。
+            Logger.Info("MovieInfo raw: Name=[{0}], Year=[{1}], PremiereDate=[{2}]",
+                info.Name, info.Year, info.PremiereDate);
+
+            // Emby 会把番号里的数字误判成年份剥离：例如输入 MBDD-2076 时，
+            // info.Name 只剩 "MBDD"，而 "2076" 被放进了 info.Year。
+            // 这里把被剥离的数字拼回去，还原完整番号。
+            var searchQuery = RestoreNumber(info.Name, info.Year);
+            if (!string.Equals(searchQuery, info.Name, StringComparison.Ordinal))
+            {
+                Logger.Info("Restored movie number: Name={0}, Year={1} => {2}",
+                    info.Name, info.Year, searchQuery);
+            }
+
             // ===================== 配置区：以后加前缀只改这里 =====================
             // 格式：旧前缀 → 新前缀（数字3位用00补，4位用0补）
             var prefixMap = new Dictionary<string, string>
@@ -314,17 +329,17 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             };
             // ======================================================================
 
-            string searchName = info.Name;
+            string searchName = searchQuery;
 
-            if (!string.IsNullOrEmpty(info.Name))
+            if (!string.IsNullOrEmpty(searchQuery))
             {
                 // 遍历所有配置的前缀，自动匹配
                 foreach (var (oldPrefix, newPrefix) in prefixMap)
                 {
-                    if (info.Name.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase))
+                    if (searchQuery.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase))
                     {
                         // 正则提取数字
-                        var match = Regex.Match(info.Name, $@"{Regex.Escape(oldPrefix)}(\d+)", RegexOptions.IgnoreCase);
+                        var match = Regex.Match(searchQuery, $@"{Regex.Escape(oldPrefix)}(\d+)", RegexOptions.IgnoreCase);
                         if (match.Success)
                         {
                             string digits = match.Groups[1].Value;
@@ -510,6 +525,37 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             .Replace("\n", "<br>");               // 单独的回车符
         
         return result;
+    }
+
+    /// <summary>
+    /// 还原被 Emby 误当成"发行年份"而拆走的番号数字。
+    ///
+    /// 背景：番号里的 4 位数字如果落在 1900-2099 区间，会被 Emby 的片名解析规则
+    /// （Emby.Naming 中 video clean-string 的 "(19\d\d|20\d\d)" 规则）识别成年份：
+    ///   MBDD-2076  →  Name="MBDD", Year=2076
+    ///   ABP-123    →  Name="ABP-123"（123 不在年份区间，不受影响）
+    /// 该规则在"入库扫描"和"手动识别(Identify)"两条路径上都会生效，
+    /// 因此必须把 Year 拼回 Name，否则搜索词会退化成 MBDD，命中大量无关结果。
+    /// </summary>
+    /// <param name="name">Emby 传入的片名（可能已被截断）。</param>
+    /// <param name="year">Emby 解析出的年份（可能为 null）。</param>
+    private static string RestoreNumber(string name, int? year)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return name;
+
+        // 情况一：Name 里已含数字，说明番号完整，无需还原。
+        // （例如 ABP-123、MBDD-2076 在未启用年份解析时的正常形态）
+        if (name.Any(char.IsDigit))
+            return name;
+
+        // 情况二：Name 只剩字母前缀，且 Emby 给出了年份 —— 判定为被拆走的番号数字。
+        if (year.HasValue)
+            return $"{name.TrimEnd('-', ' ')}-{year.Value}";
+
+        // 情况三：Name 是纯字母、但没有任何年份线索。
+        // 此时无法凭空还原数字，原样返回（保持原有行为，不做无根据的猜测）。
+        return name;
     }
 
 }
