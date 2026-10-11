@@ -265,6 +265,117 @@ public static class TranslationHelper
     }
 
     /// <summary>
+    /// 一条标题"算不算已经翻译成中文"的判定阈值：汉字占比达到 90% 即认为翻译过。
+    /// </summary>
+    public const double ChineseRatioThreshold = 0.9;
+
+    /// <summary>
+    /// 判断标题是否"已经是中文"（供 Translation EnableCheck 使用）。
+    /// </summary>
+    /// <remarks>
+    /// 为什么用比例、而不是"出现假名就否决"：实际场景里翻译完仍可能残留日文，
+    /// 因为演员名称通常不翻译，例如「VRKM-01234 美人妻 北野美奈」「新人 桜井あゆ」。
+    /// 同时日文原文里也有大量汉字（「美人妻と温泉旅行」汉字占 88%），
+    /// 所以必须靠"汉字 vs 假名"的比例来区分，而不是看有没有假名。
+    ///
+    /// 两个降噪处理（都是为了不让"非内容噪声"拉低占比导致反复重翻）：
+    /// 1. 先剔除番号 token（形如 VRKM-01234 / 3DSVR00123 / NO.1，含数字的拉丁词），
+    ///    否则番号里的字母会把「VRKM-01234 美人妻 北野美奈」压到 64%；
+    /// 2. 再尝试忽略末尾的演员名段（纯 CJK 的尾段），
+    ///    否则 kana 较多的演员名会把「新人 桜井あゆ」压到 67%。
+    /// 两种处理都只在"剩余的汉字占比更高"时才采纳，不会把标题判空。
+    /// </remarks>
+    public static bool IsTranslatedText(string text)
+    {
+        return ChineseRatio(text) >= ChineseRatioThreshold;
+    }
+
+    /// <summary>
+    /// 汉字占【字】总数的比例（0~1）。分母只统计汉字 + 假名，
+    /// 番号字母、数字、空格、标点、符号都不计入。无可统计的字时返回 0。
+    /// </summary>
+    public static double ChineseRatio(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return 0;
+
+        var stripped = StripCatalogToken(text);
+
+        // 剥掉番号后如果已经没有汉字了（例如纯番号标题 VRKM-01234），
+        // 就退回原文判断，避免把有意义的标题判成"空文本"。
+        if (CountHan(stripped) == 0) stripped = text;
+
+        // 候选：完整文本，以及忽略末尾演员名段后的文本，取更像"已翻译"的那个。
+        var best = HanRatio(stripped);
+        var trimmed = TrimTrailingActor(stripped);
+        if (trimmed != null) best = Math.Max(best, HanRatio(trimmed));
+
+        return best;
+    }
+
+    /// <summary>
+    /// 汉字 / (汉字 + 假名)。
+    /// </summary>
+    private static double HanRatio(string text)
+    {
+        var han = 0;
+        var total = 0;
+
+        foreach (var c in text)
+        {
+            if (IsHan(c)) { han++; total++; }
+            else if (IsKana(c)) total++;
+        }
+
+        return total == 0 ? 0 : (double)han / total;
+    }
+
+    private static int CountHan(string text)
+    {
+        var count = 0;
+        foreach (var c in text)
+            if (IsHan(c)) count++;
+        return count;
+    }
+
+    private static bool IsHan(char c) => c >= '\u4E00' && c <= '\u9FFF';
+
+    private static bool IsKana(char c) =>
+        c >= '\u3040' && c <= '\u309F' ||   // 平假名
+        c >= '\u30A0' && c <= '\u30FF' ||   // 片假名
+        c >= '\u31F0' && c <= '\u31FF' ||   // 片假名语音扩展
+        c >= '\uFF66' && c <= '\uFF9D';     // 半角片假名
+
+    /// <summary>
+    /// 剔除番号 token：按空格切分，丢掉任何含数字的片段
+    /// （VRKM-01234、3DSVR00123、NO.1 等）。纯粹为了消除番号对占比的稀释。
+    /// </summary>
+    private static string StripCatalogToken(string text)
+    {
+        var kept = text.Split(' ')
+            .Where(token => !token.Any(char.IsDigit))
+            .ToArray();
+
+        return kept.Length == 0 ? text : string.Join(" ", kept);
+    }
+
+    /// <summary>
+    /// 尝试去掉末尾的演员名段（最后一个空格分隔、且只由汉字/假名构成的片段）。
+    /// 演员名通常不翻译，会让已翻译标题的汉字占比偏低。
+    /// 末尾不是纯 CJK、或去掉后就没有汉字了，都返回 null 表示不作此处理。
+    /// </summary>
+    private static string TrimTrailingActor(string text)
+    {
+        var tokens = text.Split(' ');
+        if (tokens.Length < 2) return null;
+
+        var last = tokens[^1];
+        if (last.Length == 0 || !last.All(c => IsHan(c) || IsKana(c))) return null;
+
+        var head = string.Join(" ", tokens.Take(tokens.Length - 1));
+        return CountHan(head) > 0 ? head : null;
+    }
+
+    /// <summary>
     /// 是否开启了简介翻译（复用现有的 TranslationMode 开关）。
     /// </summary>
     private static bool ActorTranslationEnabled =>

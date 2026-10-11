@@ -144,9 +144,13 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             m.Genres = Configuration.GetGenreSubstitutionTable().Substitute(m.Genres).ToArray();
 
         // Translate movie info.
-        // 1. 定义检测中文的逻辑
-        // \u4e00-\u9fa5 是基本汉字的范围
-        bool alreadyTranslate = !string.IsNullOrWhiteSpace(info.Name) && !Regex.IsMatch(info.Name, @"[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF]") && !info.Name.StartsWith("[");
+        // 检测标题是否已经是中文：按【字】统计汉字占比，达到 90% 即认为翻译过。
+        // 用比例而不是"出现假名就否决"：演员名通常不翻译，翻译完的标题里
+        // 仍可能残留日文（例如「美人妻 北野美奈」「新人 桜井あゆ」），但假名占比低。
+        var hanRatio = TranslationHelper.ChineseRatio(info.Name);
+        bool alreadyTranslate = !string.IsNullOrWhiteSpace(info.Name)
+                                && !info.Name.StartsWith("[")
+                                && hanRatio >= TranslationHelper.ChineseRatioThreshold;
 
         // 2. 修改翻译触发条件
         // 如果未开启翻译，或者已经有了中文名称，就跳过翻译步骤
@@ -155,10 +159,11 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             // 开关打开，同时有中文，就跳过翻译
             if (alreadyTranslate && Configuration.EnableCheck && !isNewItem)
             {
-                Logger.Info("非新入库影片，且已经是中文了，跳过翻译阶段:'{0}'.", m.Number);
+                Logger.Info("非新入库影片，且已经是中文了（汉字占比 {0:P0}），跳过翻译阶段:'{1}'.",
+                    hanRatio, m.Number);
                 // 置为null表示不更新summary。
                 m.Summary = null;
-                if (m.Number != null)
+                if (m.Number != null && info.Name.Length > m.Number.Length)
                 {
                     m.Title = info.Name.Substring(m.Number.Length + 1);
                     //Logger.Info("还原title:'{0}'.", m.Title);
