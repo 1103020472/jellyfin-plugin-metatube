@@ -281,6 +281,40 @@ public static class ReviewAppender
 #endif
     }
 
+    /// <summary>
+    /// 翻译失败后补写「手动拉取过评论」标记。
+    ///
+    /// 为什么失败也要打标记：非全量模式（<c>FullReviewRefresh</c> 关闭）只处理带标记的条目。
+    /// 如果用户从详情页点了一次、结果翻译失败，而条目没打上标记，那它永远进不了定时任务的
+    /// 筛选范围，之后就彻底静默了——用户以为「点过了」，实际再也不会被重试。
+    ///
+    /// 仅 Emby 实现：Jellyfin 的 <c>UpdateToRepository</c> 是异步保存路径，
+    /// 而这里是异常处理流程中的同步补偿，不值得为此引入异步接口。
+    /// </summary>
+#if __EMBY__
+    public static void MarkAsManuallyPulledAfterFailure(BaseItem item, ILogger logger)
+    {
+        if (item == null)
+            return;
+
+        try
+        {
+            var current = item.Overview ?? string.Empty;
+            if (HasManualPullMarker(current))
+                return;
+
+            item.Overview = EnsureManualPullMarker(current, true);
+            item.UpdateToRepository(ItemUpdateType.MetadataEdit);
+            logger?.Info("Marked {0} as manually pulled (translation failed)", item.Name);
+        }
+        catch (Exception e)
+        {
+            // 补标记失败不能掩盖原始的翻译失败。
+            logger?.Warn("补写手动拉取标记失败：{0}：{1}", item.Name, e.Message);
+        }
+    }
+#endif
+
     /// <summary>该条目的 Overview 是否已带「手动拉取过评论」标记。</summary>
     public static bool HasManualPullMarker(string overview)
     {

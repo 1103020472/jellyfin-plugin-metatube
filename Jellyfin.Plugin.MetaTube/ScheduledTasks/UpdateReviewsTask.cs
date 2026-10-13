@@ -128,6 +128,12 @@ public class UpdateReviewsTask : IScheduledTask
             catch (Exception e)
             {
                 _logger.Error("Update reviews for video {0} error: {1}", item.Name, e.Message);
+
+#if __EMBY__
+                // 翻译失败会被记进播放列表：该条目元数据看着是好的、只是没有评论译文，
+                // 后台静默失败很难被发现，用播放列表当失败清单。
+                Helpers.TranslationFailurePlaylist.Add(item, _libraryManager, _logger);
+#endif
             }
         }
 

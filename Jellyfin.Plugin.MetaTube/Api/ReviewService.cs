@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.MetaTube;
+using Jellyfin.Plugin.MetaTube.Helpers;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Logging;
@@ -161,6 +162,14 @@ public class ReviewService : IService
                 state.Stage = "failed";
                 state.Message = e.Message;
                 Logger.Error("Pull reviews for {0} failed: {1}", item.Name, e.Message);
+
+                // 翻译失败（任一分片抛错即整批失败）时，把番号记进「翻译失败」播放列表，
+                // 否则这个条目看起来元数据齐全、只是没有评论译文，很难被发现。
+                TranslationFailurePlaylist.Add(item, LibraryManager, Logger);
+
+                // 失败也要打「手动拉取」标记：否则该条目永远不满足非全量模式的筛选条件，
+                // 定时任务再也不会重试它，用户点过一次失败后就彻底静默了。
+                ReviewAppender.MarkAsManuallyPulledAfterFailure(item, Logger);
             }
             finally
             {
