@@ -237,6 +237,11 @@
                                 <input id="txtMaxChunkSize" is="emby-input" name="txtMaxChunkSize" type="number"/>
                                 <div class="fieldDescription">AI翻译时一次性传输的最大文字个数，默认2000</div>
                             </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtMaxTranslationConcurrency">翻译并发数:</label>
+                                <input id="txtMaxTranslationConcurrency" is="emby-input" name="txtMaxTranslationConcurrency" type="number" min="1" max="32"/>
+                                <div class="fieldDescription">同时发起的翻译请求数上限，默认5。改完无需重启即时生效；调大更快但可能触发翻译服务限流。</div>
+                            </div>
                             <div class="checkboxContainer checkboxContainer-withDescription">
                                 <label class="emby-checkbox-label">
                                     <input id="chkEnableCheck" is="emby-checkbox" name="chkEnableCheck" type="checkbox"/>
@@ -250,6 +255,13 @@
                                     <span>是否要获取评论（只支持FANZA）</span>
                                 </label>
                                 <div class="fieldDescription checkboxFieldDescription"></div>
+                            </div>
+                            <div class="checkboxContainer checkboxContainer-withDescription">
+                                <label class="emby-checkbox-label">
+                                    <input id="chkFullReviewRefresh" is="emby-checkbox" name="chkFullReviewRefresh" type="checkbox"/>
+                                    <span>评论全量刷新（关闭则只刷新手动拉取过的番号）</span>
+                                </label>
+                                <div class="fieldDescription checkboxFieldDescription">需先打开上面的"是否要获取评论"。关闭时，定时任务只刷新在详情页点过"拉取评论"按钮的番号；打开时对所有番号都抓取评论（慢且耗翻译额度）。</div>
                             </div>
                             <div class="checkboxContainer checkboxContainer-withDescription">
                                 <label class="emby-checkbox-label">
@@ -395,8 +407,10 @@
                 $('#txtOpenAiApiUrl', page).val(config.OpenAiApiUrl).change();
                 $('#txtOpenAiModel', page).val(config.OpenAiModel).change();
                 $('#txtMaxChunkSize', page).val(config.MaxChunkSize).change();
+                $('#txtMaxTranslationConcurrency', page).val(config.MaxTranslationConcurrency).change();
                 page.querySelector('#chkEnableCheck').checked = config.EnableCheck;
                 page.querySelector('#chkReviewSwitch').checked = config.ReviewSwitch;
+                page.querySelector('#chkFullReviewRefresh').checked = config.FullReviewRefresh;
                 page.querySelector('#chkEnableForceRefetch').checked = config.EnableForceRefetch;
                 page.querySelector('#chkEnableTitleSubstitution').checked = config.EnableTitleSubstitution;
                 $('#txtTitleRawSubstitutionTable', page).val(config.TitleRawSubstitutionTable).change();
@@ -440,8 +454,10 @@
                 config.OpenAiApiUrl = $('#txtOpenAiApiUrl', form).val();
                 config.OpenAiModel = $('#txtOpenAiModel', form).val();
                 config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
+                config.MaxTranslationConcurrency = $('#txtMaxTranslationConcurrency', form).val();
                 config.EnableCheck = $('#chkEnableCheck', form).prop('checked');
                 config.ReviewSwitch = $('#chkReviewSwitch', form).prop('checked');
+                config.FullReviewRefresh = $('#chkFullReviewRefresh', form).prop('checked');
                 config.EnableForceRefetch = $('#chkEnableForceRefetch', form).prop('checked');
                 config.EnableTitleSubstitution = $('#chkEnableTitleSubstitution', form).prop('checked');
                 config.TitleRawSubstitutionTable = $('#txtTitleRawSubstitutionTable', form).val();

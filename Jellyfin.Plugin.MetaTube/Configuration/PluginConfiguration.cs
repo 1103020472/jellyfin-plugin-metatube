@@ -222,6 +222,22 @@ public class PluginConfiguration : BasePluginConfiguration
     [DisplayName("Translation MaxChunkSize")]
 #endif
     public int MaxChunkSize { get; set; } = 2000;
+
+    /// <summary>
+    /// 翻译时同时发起的请求数上限（旧版本写死为 5）。
+    ///
+    /// 调大能缩短多分片评论的整体耗时（整体耗时由最慢的一片决定），
+    /// 但会同时压到翻译服务的速率限制；调小则更稳。
+    /// 改动后**无需重启**，下一次翻译请求就会按新值限流。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Translation concurrency")]
+    [Description(
+        "Max concurrent translation requests. Default 5. Takes effect without restart. Higher is faster but may hit provider rate limits.")]
+    [MinValue(1)]
+    [MaxValue(32)]
+#endif
+    public int MaxTranslationConcurrency { get; set; } = 5;
     
     // 标题已经包含中文时，认为已经翻译过了
 #if __EMBY__
@@ -234,6 +250,25 @@ public class PluginConfiguration : BasePluginConfiguration
     [DisplayName("Show Reviews")]
 #endif
     public bool ReviewSwitch { get; set; } = false;
+
+    /// <summary>
+    /// 评论更新的「全量刷新」开关，默认关闭。
+    ///
+    /// 仅在 <see cref="ReviewSwitch"/> 打开时才生效（<see cref="ReviewSwitch"/> 仍是总开关，
+    /// 刮削与定时任务都读它）：
+    ///   * 关闭（默认）：定时任务只刷新「曾被详情页按钮手动拉取过评论」的番号，
+    ///     这些番号的 Overview 里带有 <c>ReviewAppender.ManualPullMarker</c> 标记；
+    ///   * 打开：恢复原有行为——对所有番号都抓取评论。
+    ///
+    /// 之所以默认关闭：全库抓评论（每条都要翻译）非常慢且烧翻译额度，
+    /// 而绝大多数番号用户并不会去看评论。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Full review refresh")]
+    [Description(
+        "Update task refreshes reviews for all items. When off, only items whose reviews were pulled manually from the detail page are refreshed.")]
+#endif
+    public bool FullReviewRefresh { get; set; } = false;
 
     /// <summary>
     /// 打开后，"刷新元数据"（以及补齐任务发现资料缺失时）会携带 update: true，

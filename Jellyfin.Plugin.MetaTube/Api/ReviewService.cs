@@ -145,7 +145,7 @@ public class ReviewService : IService
                 using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
 
                 var result = await ReviewAppender.AppendAsync(
-                    item, Logger, LibraryManager, OnProgress, cts.Token);
+                    item, Logger, LibraryManager, OnProgress, cts.Token, markAsManuallyPulled: true);
 
                 state.Appended = result.Appended;
                 Volatile.Write(ref state.NewReviewCount, result.NewReviewCount);

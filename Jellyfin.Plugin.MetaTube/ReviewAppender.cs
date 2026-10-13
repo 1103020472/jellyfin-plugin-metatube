@@ -2,10 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.MetaTube.Configuration;
 using Jellyfin.Plugin.MetaTube.Extensions;
+using Jellyfin.Plugin.MetaTube.Helpers;
 using Jellyfin.Plugin.MetaTube.Metadata;
 using Jellyfin.Plugin.MetaTube.Translation;
 using MediaBrowser.Controller.Entities;
@@ -42,10 +44,24 @@ public static class ReviewAppender
     /// </summary>
     private static readonly DateTime TimeThreshold = new(2026, 6, 11, 23, 59, 59);
 
+    // 表头在「📝 观众评论」后只补一个 <br>：紧接着的第一条评论自己会再补一个 <br>
+    // （作者行末尾），合起来正好是一个空行。这里多写一个就会变成两个空行。
     private const string ReviewHeader =
-        "<br><br>————————————————————————————<br><font color=\"#fce83a\" size=\"4\"><b>📝 观众评论</b></font><br><br>";
+        "<br><br>————————————————————————————<br><font color=\"#fce83a\" size=\"4\"><b>📝 观众评论</b></font><br>";
 
     private const string ReviewHeaderMarker = "📝 观众评论";
+
+    /// <summary>
+    /// 「详情页按钮手动拉取过评论」的标记，写在 Overview 末尾。
+    ///
+    /// 用自闭合自定义标签：HTML 渲染时不会显示任何内容（未知元素且无子节点），
+    /// 因此不会影响详情页观感；同时它是纯文本，Emby 不会在保存时把它剥掉。
+    ///
+    /// 用途：<c>FullReviewRefresh</c> 关闭时，定时任务只处理带此标记的条目。
+    /// 注意判重必须放在 Overview 的「评论区」之外也成立——标记在末尾，且即便出现在
+    /// 评论正文里也无害（只会让该条目被多刷新一次，不会造成数据损坏）。
+    /// </summary>
+    public const string ManualPullMarker = "<metatube-reviews/>";
 
     /// <summary>
     /// 单个条目追加评论的结果。
@@ -75,6 +91,10 @@ public static class ReviewAppender
     /// <c>(stage, finishedChunks, chunkCount, newReviewCount)</c>；分片是并发翻译的，
     /// finishedChunks 只表示「已经有多少片回来了」，不是时间比例。可传 null。
     ///
+    /// <paramref name="markAsManuallyPulled"/> 为 true 时表示这次是用户从详情页按钮
+    /// 主动触发的，会在 Overview 里写入 <see cref="ManualPullMarker"/>，
+    /// 使该条目之后被定时任务纳入刷新范围（见 <c>FullReviewRefresh</c>）。
+    ///
     /// 注意：调用方需自行保证同一个条目不会被并发调用（见 <c>ReviewService</c> 的在途去重），
     /// 否则两次调用可能读到同一份 Overview 并各自追加，造成重复。
     /// </summary>
@@ -83,7 +103,8 @@ public static class ReviewAppender
         ILogger logger,
         ILibraryManager libraryManager,
         Action<string, int, int, int> onProgress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool markAsManuallyPulled = false)
     {
         var result = new AppendResult();
 
@@ -108,10 +129,28 @@ public static class ReviewAppender
 
         // ---- 1. 抓取远程评论 ----
         onProgress?.Invoke("fetching", 0, 0, 0);
-        var remoteReviews = await ApiClient.GetReviewsAsync(pid.Provider, pid.Id, false, cancellationToken);
+        List<ReviewInfo> remoteReviews;
+        try
+        {
+            remoteReviews = await ApiClient.GetReviewsAsync(pid.Provider, pid.Id, false, cancellationToken);
+        }
+        catch (Exception e) when (ApiErrorClassifier.IsNoReviews(e))
+        {
+            // 源站没有评论时服务端返回 404 info not found，这是正常结果而非故障。
+            // 仍然打标记：用户主动拉过一次就应纳入刷新范围，现在没有不代表以后没有。
+            logger?.Info("番号 {0}（{1}）源站暂无评论（服务端返回：{2}）", pid.Id, pid.Provider, e.Message);
+            result.Message = "源站暂无评论";
+            await TryMarkManuallyPulledAsync(
+                item, logger, libraryManager, markAsManuallyPulled, cancellationToken);
+            return result;
+        }
+
         if (remoteReviews == null || !remoteReviews.Any())
         {
             result.Message = "远程没有评论";
+            // 用户主动拉过一次就应纳入刷新范围：现在没有评论不代表以后没有。
+            await TryMarkManuallyPulledAsync(
+                item, logger, libraryManager, markAsManuallyPulled, cancellationToken);
             return result;
         }
 
@@ -134,6 +173,10 @@ public static class ReviewAppender
         if (!newReviews.Any())
         {
             result.Message = "没有新评论";
+            // 手动拉取过（哪怕没拉到新评论）也要打标记，否则用户点了一次却仍是"未订阅"，
+            // 定时任务永远不会刷新这个番号。
+            await TryMarkManuallyPulledAsync(
+                item, logger, libraryManager, markAsManuallyPulled, cancellationToken);
             return result;
         }
 
@@ -180,18 +223,20 @@ public static class ReviewAppender
         if (string.IsNullOrWhiteSpace(appendedOverviewPart))
         {
             result.Message = "翻译结果为空";
+            await TryMarkManuallyPulledAsync(
+                item, logger, libraryManager, markAsManuallyPulled, cancellationToken);
             return result;
         }
 
         // ---- 4. 追加写回 Overview（不重抓简介）----
         onProgress?.Invoke("saving", result.ChunkCount, result.ChunkCount, newReviews.Count);
 
-        // 已有评论区时去掉重复的表头，让新评论自然接在下面
+        // 已有评论区时去掉重复的表头，让新评论自然接在下面。
+        // 上一条评论已经以 <br> 结尾，这里再补一个 <br> 正好凑成一个空行。
         if (currentOverview.Contains(ReviewHeaderMarker) && appendedOverviewPart.Contains(ReviewHeader))
-            appendedOverviewPart = appendedOverviewPart.Replace(ReviewHeader, "<br><br>");
+            appendedOverviewPart = appendedOverviewPart.Replace(ReviewHeader, "<br>");
 
-        item.Overview = currentOverview + appendedOverviewPart;
-
+        item.Overview = EnsureManualPullMarker(currentOverview + appendedOverviewPart, markAsManuallyPulled);
 #if __EMBY__
         item.UpdateToRepository(ItemUpdateType.MetadataEdit);
 #else
@@ -203,6 +248,75 @@ public static class ReviewAppender
         result.Message = $"新增 {result.NewReviewCount} 条评论";
         logger?.Info("Successfully appended reviews for {0}", item.Name);
         return result;
+    }
+
+    /// <summary>
+    /// 手动拉取但本次没有新增评论时，只补一个标记并写回。
+    /// 已经带标记则不写库，避免无意义的元数据更新。
+    /// </summary>
+    private static Task TryMarkManuallyPulledAsync(
+        BaseItem item,
+        ILogger logger,
+        ILibraryManager libraryManager,
+        bool markAsManuallyPulled,
+        CancellationToken cancellationToken)
+    {
+        if (!markAsManuallyPulled)
+            return Task.CompletedTask;
+
+        var current = item.Overview ?? string.Empty;
+        if (HasManualPullMarker(current))
+            return Task.CompletedTask;
+
+        item.Overview = EnsureManualPullMarker(current, true);
+#if __EMBY__
+        // Emby 的保存是同步 API，这里没有可 await 的调用。
+        item.UpdateToRepository(ItemUpdateType.MetadataEdit);
+        logger?.Info("Marked {0} as manually pulled (no new reviews)", item.Name);
+        return Task.CompletedTask;
+#else
+        logger?.Info("Marked {0} as manually pulled (no new reviews)", item.Name);
+        return libraryManager.UpdateItemAsync(
+            item, item.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken);
+#endif
+    }
+
+    /// <summary>该条目的 Overview 是否已带「手动拉取过评论」标记。</summary>
+    public static bool HasManualPullMarker(string overview)
+    {
+        return !string.IsNullOrEmpty(overview)
+               && overview.Contains(ManualPullMarker, StringComparison.Ordinal);
+    }
+
+    /// <summary>该条目是否应被定时任务的「非全量」模式处理。</summary>
+    public static bool IsMarkedAsManuallyPulled(BaseItem item)
+    {
+        return HasManualPullMarker(item?.Overview);
+    }
+
+    /// <summary>
+    /// 按需在 Overview 末尾补上手动拉取标记。
+    ///
+    /// 关键点：标记必须**始终位于末尾**。第一次手动拉取时标记写在末尾，之后再次追加评论
+    /// 时新评论会接在标记后面，导致标记漂到正文中间（虽然 <see cref="HasManualPullMarker"/>
+    /// 只做 Contains 判断、功能上仍然正确，但会让标记夹在评论之间，既难看又难排查）。
+    /// 所以这里先把已有的标记全部剥掉，再统一追加到末尾，保证幂等且位置稳定。
+    /// </summary>
+    private static string EnsureManualPullMarker(string overview, bool markAsManuallyPulled)
+    {
+        var text = overview ?? string.Empty;
+
+        if (!markAsManuallyPulled)
+        {
+            // 不写标记时也要剥掉旧标记吗？不要——定时任务路径必须保留用户已有标记，
+            // 否则每次全量/增量刷新都会把这个番号从"已订阅"里踢出去。
+            return text;
+        }
+
+        if (text.Contains(ManualPullMarker, StringComparison.Ordinal))
+            text = text.Replace(ManualPullMarker, string.Empty, StringComparison.Ordinal);
+
+        return text + ManualPullMarker;
     }
 
     /// <summary>粗略估算分片数，仅用于翻译开始前的进度提示。</summary>
@@ -236,7 +350,8 @@ public static class ReviewAppender
             if (!string.IsNullOrWhiteSpace(c.Comment))
                 sb.Append($"{c.Comment}<br>");
 
-            sb.Append("<br><br>");
+            // 评论之间只留一个空行（理由同 TranslationHelper 的评论拼接）。
+            sb.Append("<br>");
         }
 
         var header = new StringBuilder();
@@ -250,17 +365,39 @@ public static class ReviewAppender
     /// <summary>
     /// 将原生换行符转换为 HTML 的 &lt;br&gt;，确保前端 Overview 正常换行。
     /// 与 MovieProvider / ActorProvider 里的同名实现保持一致。
+    ///
+    /// 额外把「空行」也规整掉：模型有时会把原文的一个空行改写成多个空行，
+    /// 或者把已有 &lt;br&gt; 和裸换行混着输出，导致相邻 &lt;br&gt; 越滚越多。
+    /// 这里统一压成最多一个空行（&lt;br&gt;&lt;br&gt;）。
     /// </summary>
     private static string ConvertNewlinesToBr(string input)
     {
         if (string.IsNullOrEmpty(input))
             return input;
 
-        return input
+        var text = input
             .Replace("\r\n", "\n")
             .Replace("\r", "\n")
             .Replace("\n", "<br>");
+
+        // 兜底还原星级占位符（正常情况下 TranslationHelper 已经还原过了）。
+        text = LeftoverStarTokenRegex.Replace(text, m =>
+        {
+            var score = Math.Clamp(int.Parse(m.Groups[1].Value), 0, 5);
+            return new string('⭐', score) + new string('☆', 5 - score);
+        });
+
+        return ExcessiveBrRegex.Replace(text, "<br><br>");
     }
+
+    // 3 个以上连续的 <br>（含带空格 / 自闭合写法）压缩成一个空行。
+    private static readonly Regex ExcessiveBrRegex =
+        new(@"(?:<br\s*/?>){3,}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // 保险丝：万一有星级占位符 [[S4]] 没被还原（例如模型把它改写成别的形式），
+    // 也要保证这种内部标记绝不会出现在用户可见的简介里。
+    private static readonly Regex LeftoverStarTokenRegex =
+        new(@"\[\[\s*S\s*(\d{1,2})\s*\]\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static PluginConfiguration Configuration => Plugin.Instance.Configuration;
 }

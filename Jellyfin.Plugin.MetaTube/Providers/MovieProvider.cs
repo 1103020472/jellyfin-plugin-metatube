@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Jellyfin.Plugin.MetaTube.Configuration;
 using Jellyfin.Plugin.MetaTube.Extensions;
+using Jellyfin.Plugin.MetaTube.Helpers;
 using Jellyfin.Plugin.MetaTube.Metadata;
 using Jellyfin.Plugin.MetaTube.Translation;
 using MediaBrowser.Controller.Entities;
@@ -115,10 +116,25 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             {
                 var reviewInfos = await ApiClient.GetReviewsAsync(pid.Provider, pid.Id, cancellationToken);
                 m.Reviews = reviewInfos;
+
+                if (reviewInfos == null || reviewInfos.Count == 0)
+                {
+                    Logger.Info("番号 {0}（{1}）源站暂无评论，按无评论处理。", pid.Id, pid.Provider);
+                }
+            }
+            catch (Exception e) when (ApiErrorClassifier.IsNoReviews(e))
+            {
+                // 源站没有评论是正常情况（例如总集篇 ofje00614），不是故障：
+                // 服务端此时返回 404 info not found，降级为 Info 并说明原因，
+                // 否则日志里的 Error 会把真正的服务端故障淹没。
+                m.Reviews = null;
+                Logger.Info("番号 {0}（{1}）源站没有评论（服务端返回：{2}），按无评论处理。",
+                    pid.Id, pid.Provider, e.Message);
             }
             catch (Exception e)
             {
-                Logger.Error("获取评论失败：{0}", pid.Id, e);
+                // 这里才是真正的失败：网络不通、服务端 5xx、鉴权失败等。
+                Logger.Error("获取评论失败：{0}（来源 {1}）：{2}", pid.Id, pid.Provider, e.Message);
             }
         }
         
@@ -412,7 +428,6 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
                 Logger.Warn("Actor not found: {0}", actor.Name);
                 return;
             }
-
             // 优先选择 AV-LEAGUE
             var preferredResult = results.FirstOrDefault(r =>
                 string.Equals(r.Provider, AvLeague, StringComparison.OrdinalIgnoreCase));
@@ -449,9 +464,19 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
                 }
             }
         }
+        catch (Exception e) when (ApiErrorClassifier.IsNotFound(e))
+        {
+            // 注意：这里的失败几乎都不是"图片取不到"，而是**演员根本没搜到**。
+            // 服务端 /v1/actors/search 在结果数为 0 时返回 404 Not Found
+            // （route/search.go: resultsLength == 0），此时插件连图片 URL 都构造不出来。
+            // 未刮削过的演员就会走到这里，属于正常现象，不该记成 Error。
+            Logger.Warn("演员 {0} 未搜到，跳过头像设置（服务端返回：{1}）",
+                actor.Name, e.Message);
+        }
         catch (Exception e)
         {
-            Logger.Error("Get actor image error: {0} ({1})", actor.Name, e.Message);
+            // 这里才是真的图片/网络故障。
+            Logger.Error("设置演员头像失败：{0}：{1}", actor.Name, e.Message);
         }
     }
 

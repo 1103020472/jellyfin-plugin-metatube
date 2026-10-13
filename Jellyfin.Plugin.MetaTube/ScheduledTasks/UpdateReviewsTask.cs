@@ -62,12 +62,19 @@ public class UpdateReviewsTask : IScheduledTask
     public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
 #endif
     {
-        // 若配置未开启获取评论功能，则跳过任务
-        if (!Plugin.Instance.Configuration.ReviewSwitch)
+        var configuration = Plugin.Instance.Configuration;
+
+        // ReviewSwitch 是总开关：刮削与定时任务都读它，关掉则一切评论相关逻辑都不跑。
+        if (!configuration.ReviewSwitch)
         {
             _logger.Info("Review switch is disabled in configuration. Skipping UpdateReviewsTask.");
             return;
         }
+
+        // 非全量模式下只刷新「手动拉取过评论」的番号，其余条目直接跳过，
+        // 避免全库抓评论带来的长时间运行与翻译额度消耗。
+        var fullRefresh = configuration.FullReviewRefresh;
+        _logger.Info("UpdateReviewsTask started, full review refresh: {0}", fullRefresh);
 
         await Task.Yield();
         progress?.Report(0);
@@ -86,6 +93,24 @@ public class UpdateReviewsTask : IScheduledTask
 #endif
         }).ToList();
 
+        // 非全量模式：先按 Overview 里的手动拉取标记过滤，减少后续无效请求。
+        if (!fullRefresh)
+        {
+            var before = items.Count;
+            items = items.Where(ReviewAppender.IsMarkedAsManuallyPulled).ToList();
+            _logger.Info("Full review refresh is off, processing {0}/{1} manually pulled items.",
+                items.Count, before);
+        }
+
+        // 过滤后可能一条都不剩（例如还没手动拉取过任何番号）：
+        // 此时必须提前返回，否则下面的 (double)idx / items.Count 会除零。
+        if (items.Count == 0)
+        {
+            _logger.Info("No items to update reviews for. Skipping.");
+            progress?.Report(100);
+            return;
+        }
+
         // 评论 provider 过滤、时间阈值判重等逻辑已移入 ReviewAppender，两个入口共用。
         foreach (var (idx, item) in items.WithIndex())
         {
@@ -96,7 +121,9 @@ public class UpdateReviewsTask : IScheduledTask
             {
                 // 追加逻辑与「详情页按需拉取」完全共用，保证行为一致：
                 // 只追加新增评论、按时间标记判重、不重抓简介。
-                await ReviewAppender.AppendAsync(item, _logger, _libraryManager, null, cancellationToken);
+                // 定时任务本身不算「手动拉取」，所以不写标记。
+                await ReviewAppender.AppendAsync(
+                    item, _logger, _libraryManager, null, cancellationToken);
             }
             catch (Exception e)
             {

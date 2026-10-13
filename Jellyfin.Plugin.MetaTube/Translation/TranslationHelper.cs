@@ -11,9 +11,137 @@ public static class TranslationHelper
     private const string AutoLanguageCode = "auto";
     private const string JapaneseLanguageCode = "ja";
 
-    private static readonly SemaphoreSlim Semaphore = new(5);
+    /// <summary>
+    /// 翻译并发闸门。并发上限来自配置项 <c>MaxTranslationConcurrency</c>，
+    /// 并且**支持运行时动态调整**（改配置后无需重启，见 <see cref="ApplyConcurrencyLimit"/>）。
+    ///
+    /// 之所以不用 <c>SemaphoreSlim</c>：它的并发上限在构造时固定，无法缩小；
+    /// 并发数调小后必须等旧请求自然跑完才能生效，期间"配置已改但没生效"很难排查。
+    /// 这里用一个可增可减的计数器：调大立刻放行更多，调小则等已发出的请求返回后自然收敛。
+    /// </summary>
+    private static readonly TranslationGate Gate = new();
+
+    /// <summary>上一次生效的并发值，用于检测配置变化（0 表示尚未初始化）。</summary>
+    private static int _appliedConcurrency;
 
     private static PluginConfiguration Configuration => Plugin.Instance.Configuration;
+
+    /// <summary>
+    /// 按当前配置刷新并发上限。每次发起翻译前都会调用，
+    /// 因此用户在配置页改完并发数后，下一次翻译就生效（无需重启）。
+    /// </summary>
+    private static void ApplyConcurrencyLimit()
+    {
+        var limit = Configuration.MaxTranslationConcurrency;
+        if (limit <= 0)
+            limit = DefaultMaxTranslationConcurrency;
+
+        if (Interlocked.Exchange(ref _appliedConcurrency, limit) != limit)
+            Gate.SetLimit(limit);
+    }
+
+    /// <summary>配置留空/非法时使用的默认并发数（与旧版本写死的 5 一致）。</summary>
+    public const int DefaultMaxTranslationConcurrency = 5;
+
+    /// <summary>
+    /// 可动态调整上限的并发闸门。
+    ///
+    /// 实现要点：<see cref="SemaphoreSlim"/> 无法缩小上限，所以自己用计数器实现。
+    /// 调大时直接抬高上限并唤醒等待者；调小时只降低上限，不打断已获得许可的请求，
+    /// 它们释放后 <see cref="Release"/> 会让占用数自然降到新上限以下。
+    /// </summary>
+    private sealed class TranslationGate
+    {
+        private readonly object _sync = new();
+        private int _limit;
+        private int _current;
+        private readonly LinkedList<TaskCompletionSource<bool>> _waiters = new();
+
+        public TranslationGate()
+        {
+            _limit = DefaultMaxTranslationConcurrency;
+        }
+
+        public void SetLimit(int limit)
+        {
+            if (limit < 1)
+                limit = 1;
+
+            LinkedList<TaskCompletionSource<bool>> toRelease = null;
+
+            lock (_sync)
+            {
+                _limit = limit;
+
+                // 上限调大后，可能有等待者已经能进：按 FIFO 逐个放行。
+                while (_waiters.Count > 0 && _current < _limit)
+                {
+                    var waiter = _waiters.First.Value;
+                    _waiters.RemoveFirst();
+                    _current++;
+                    (toRelease ??= new LinkedList<TaskCompletionSource<bool>>()).AddLast(waiter);
+                }
+            }
+
+            // 在锁外完成，避免唤醒后的续体在持锁线程上同步跑起来造成死锁。
+            if (toRelease == null)
+                return;
+
+            foreach (var waiter in toRelease)
+                waiter.TrySetResult(true);
+        }
+
+        public Task WaitAsync(CancellationToken cancellationToken)
+        {
+            lock (_sync)
+            {
+                if (_current < _limit)
+                {
+                    _current++;
+                    return Task.CompletedTask;
+                }
+
+                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var node = _waiters.AddLast(tcs);
+                if (cancellationToken.CanBeCanceled)
+                {
+                    // 取消时把等待者从队列摘掉，否则会永久占位导致并发数慢慢"泄漏"到 0。
+                    cancellationToken.Register(() =>
+                    {
+                        lock (_sync)
+                        {
+                            if (node.List != null)
+                            {
+                                _waiters.Remove(node);
+                                tcs.TrySetCanceled(cancellationToken);
+                            }
+                        }
+                    });
+                }
+
+                return tcs.Task;
+            }
+        }
+
+        public void Release()
+        {
+            TaskCompletionSource<bool> next = null;
+            lock (_sync)
+            {
+                if (_current > 0)
+                    _current--;
+
+                if (_waiters.Count > 0 && _current < _limit)
+                {
+                    next = _waiters.First.Value;
+                    _waiters.RemoveFirst();
+                    _current++;
+                }
+            }
+
+            next?.TrySetResult(true);
+        }
+    }
 
     #region 源语言判定
 
@@ -149,7 +277,9 @@ public static class TranslationHelper
                 throw new ArgumentException($"Invalid translation engine: {Configuration.TranslationEngine}");
         }
 
-        await Semaphore.WaitAsync(cancellationToken);
+        // 每次翻译前同步一次并发配置，实现"改配置即生效"。
+        ApplyConcurrencyLimit();
+        await Gate.WaitAsync(cancellationToken);
 
         try
         {
@@ -170,7 +300,7 @@ public static class TranslationHelper
         }
         finally
         {
-            Semaphore.Release();
+            Gate.Release();
         }
     }
 
@@ -202,20 +332,21 @@ public static class TranslationHelper
                     sb.Append($" · {commentTime}");
                 sb.Append("<br>");
 
-                // 2. 星级 + 标题
+                // 2. 星级 + 标题（星级用占位符，翻译完再还原，见 StarTokenRegex）
                 int score = Math.Clamp(c.Score, 0, 5);
-                string filledStar = new string('⭐', score);
-                string emptyStar = new string('☆', 5 - score);
-                string starIcon = $"{filledStar}{emptyStar}";
+                string starIcon = BuildStarToken(score);
                 string commentTitle = string.IsNullOrWhiteSpace(c.Title) ? "" : c.Title;
                 if (!string.IsNullOrWhiteSpace(starIcon) || !string.IsNullOrWhiteSpace(commentTitle))
                     sb.Append($"<b>{starIcon} {commentTitle}</b><br>");
 
                 // 3. 评论内容（原文，暂不翻译）
                 if (!string.IsNullOrWhiteSpace(c.Comment))
-                    sb.Append($"{c.Comment}<br>");
+                    sb.Append($"{NormalizeReviewBody(c.Comment)}<br>");
 
-                sb.Append("<br><br>");
+                // 评论之间只留一个空行：上一条的 "…<br>" 已经换了一行，这里再补一个 <br>
+                // 正好凑成 <br><br>（一个空行）。之前多补一个会变成 <br><br><br>，
+                // 渲染出来就是两条评论之间空两行。
+                sb.Append("<br>");
             }
 
             reviewHtmlContent = sb.ToString();
@@ -267,7 +398,7 @@ public static class TranslationHelper
 
             // 等待评论所有分片完成，合并成完整翻译后的 HTML
             var translatedReviewChunks = await Task.WhenAll(reviewTasks);
-            reviewHtmlTask = Task.FromResult(string.Join("<br>", translatedReviewChunks));
+            reviewHtmlTask = Task.FromResult(RestoreStarTokens(RepairBoldTags(string.Join("<br>", translatedReviewChunks))));
         }
 
         // ==============================================
@@ -365,16 +496,18 @@ public static class TranslationHelper
                 sb.Append($" · {commentTime}");
             sb.Append("<br>");
 
+            // 星级用占位符，翻译完再还原（见 StarTokenRegex）
             var score = Math.Clamp(c.Score, 0, 5);
-            var starIcon = $"{new string('⭐', score)}{new string('☆', 5 - score)}";
+            var starIcon = BuildStarToken(score);
             var commentTitle = string.IsNullOrWhiteSpace(c.Title) ? "" : c.Title;
             if (!string.IsNullOrWhiteSpace(starIcon) || !string.IsNullOrWhiteSpace(commentTitle))
                 sb.Append($"<b>{starIcon} {commentTitle}</b><br>");
 
             if (!string.IsNullOrWhiteSpace(c.Comment))
-                sb.Append($"{c.Comment}<br>");
+                sb.Append($"{NormalizeReviewBody(c.Comment)}<br>");
 
-            sb.Append("<br><br>");
+            // 评论之间只留一个空行（理由同 TranslateAsync 里的评论分支）。
+            sb.Append("<br>");
         }
 
         var reviewHtmlContent = sb.ToString();
@@ -404,6 +537,7 @@ public static class TranslationHelper
 
         var translatedReviewChunks = await Task.WhenAll(reviewTasks);
         var translatedReviewHtml = string.Join("<br>", translatedReviewChunks);
+        translatedReviewHtml = RestoreStarTokens(RepairBoldTags(translatedReviewHtml));
 
         if (string.IsNullOrWhiteSpace(translatedReviewHtml))
             return result;
@@ -437,6 +571,181 @@ public static class TranslationHelper
     }
 
     #region 演员简介
+
+    /// <summary>
+    /// 星级占位符，形如 <c>[[S4]]</c>（4 星）。
+    ///
+    /// 为什么不直接把 ⭐⭐⭐⭐☆ 交给模型：这是一串高度重复的符号，模型在复制它时
+    /// 容易数错个数、把标签断开（<c>&lt;b&gt;⭐⭐</c> + <c>&lt;b&gt;⭐⭐⭐ 标题&lt;/b&gt;</c>）
+    /// 或者重复闭合标签（<c>&lt;/b&lt;/b&gt;</c>），进而导致标题跑到相邻评论下、甚至整条评论丢失。
+    /// 换成短占位符后模型根本不需要碰这些符号，翻译质量与稳定性都更好，token 也更省。
+    /// </summary>
+    private static readonly Regex StarTokenRegex = new(@"\[\[\s*S\s*(\d{1,2})\s*\]\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>生成星级占位符（不直接输出 ⭐，翻译完成后再由 <see cref="RestoreStarTokens"/> 还原）。</summary>
+    private static string BuildStarToken(int score)
+    {
+        score = Math.Clamp(score, 0, 5);
+        return $"[[S{score}]]";
+    }
+
+    /// <summary>
+    /// 把占位符还原成真实的星级符号。
+    ///
+    /// 兼容模型改写的几种形式：大小写、内部空格、以及把方括号写成全角或漏掉一侧。
+    /// 无法识别的占位符按 0 星处理（宁可显示 ☆☆☆☆☆，也不要把 <c>[[S4]]</c> 这种
+    /// 内部标记泄露到用户可见的简介里）。
+    /// </summary>
+    private static string RestoreStarTokens(string html)
+    {
+        if (string.IsNullOrEmpty(html) || html.IndexOf("[[", StringComparison.Ordinal) < 0)
+            return html;
+
+        return StarTokenRegex.Replace(html, m =>
+        {
+            // 模型理论上不会改数字，但真改了就夹到 0-5，避免出现越界星级。
+            var score = Math.Clamp(int.Parse(m.Groups[1].Value), 0, 5);
+            return new string('⭐', score) + new string('☆', 5 - score);
+        });
+    }
+
+
+    /// <summary>
+    /// 规范化单条评论的正文（在拼进 HTML 之前调用）。
+    ///
+    /// FANZA 的评论原文里带真实的换行符，作者会用它分段。这里把换行统一成
+    /// &lt;br&gt;，并保证：
+    ///   * 原文只有一个空行的地方，转换后也只有一个空行（<c>&lt;br&gt;&lt;br&gt;</c>）；
+    ///   * 多余的空行（作者敲了 3 个以上换行）压缩成一个空行；
+    ///   * 首尾的空行去掉 —— 评论之间的间距由拼接代码统一控制，
+    ///     否则会和后面补的 &lt;br&gt; 叠成两个空行。
+    ///
+    /// 之所以在「拼进 HTML 之前」就转换，而不是等翻译完再转：
+    /// 分片是按 &lt;br&gt; 边界切的，提前转换能保证分片边界落在标签上，
+    /// 也不会让裸换行进入模型输入（模型可能把它吃掉或改写成别的形式）。
+    /// </summary>
+    private static string NormalizeReviewBody(string comment)
+    {
+        if (string.IsNullOrWhiteSpace(comment))
+            return string.Empty;
+
+        var text = comment.Replace("\r\n", "\n").Replace("\r", "\n");
+
+        // 换行 -> <br>，随后把 3 个以上连续的 <br> 压成 2 个（即最多一个空行）。
+        text = text.Replace("\n", "<br>");
+        text = ExcessiveBrRegex.Replace(text, "<br><br>");
+
+        // 去掉首尾换行标签，评论之间的间距交给调用方控制。
+        text = text.Trim();
+        text = LeadingBrRegex.Replace(text, string.Empty);
+        text = TrailingBrRegex.Replace(text, string.Empty);
+        return text.Trim();
+    }
+
+    private static readonly Regex ExcessiveBrRegex =
+        new(@"(?:<br\s*/?>){3,}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex LeadingBrRegex =
+        new(@"^(?:<br\s*/?>)+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex TrailingBrRegex =
+        new(@"(?:<br\s*/?>)+$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// 修复翻译结果里的 &lt;b&gt; 标签。
+    ///
+    /// 模型偶尔会把评论标题写成一个完整句子，于是只输出 &lt;b&gt;…却忘了 &lt;/b&gt;，
+    /// 一旦漏掉闭合标签，后面整段评论（甚至下一条评论）都会被渲染成粗体。
+    /// 这里做三件事：
+    ///   1. 保证 &lt;b&gt; / &lt;/b&gt; 成对；
+    ///   2. 遇到换行时自动闭合，让加粗最多只覆盖到本行末尾
+    ///      （评论标题本来就只有一行，这样即使模型漏写也不会污染正文）；
+    ///   3. 丢弃空标签、清理嵌套。
+    /// </summary>
+    private static string RepairBoldTags(string html)
+    {
+        if (string.IsNullOrEmpty(html) || html.IndexOf("<b", StringComparison.OrdinalIgnoreCase) < 0)
+            return html;
+
+        var sb = new StringBuilder(html.Length);
+        var open = false;
+        var lastIndex = 0;
+
+        foreach (Match token in BoldTokenRegex.Matches(html))
+        {
+            if (token.Index > lastIndex)
+                AppendPlainText(sb, html.Substring(lastIndex, token.Index - lastIndex), ref open);
+
+            lastIndex = token.Index + token.Length;
+
+            if (token.Value.StartsWith("</", StringComparison.Ordinal))
+            {
+                // 多余的闭合标签：只有真的处于加粗状态才输出。
+                if (open)
+                {
+                    sb.Append("</b>");
+                    open = false;
+                }
+            }
+            else
+            {
+                // 前一个标签还没闭合就来了新的：先补上闭合。
+                if (open)
+                {
+                    sb.Append("</b>");
+                    open = false;
+                }
+
+                sb.Append("<b>");
+                open = true;
+            }
+        }
+
+        if (lastIndex < html.Length)
+            AppendPlainText(sb, html.Substring(lastIndex), ref open);
+
+        if (open)
+            sb.Append("</b>");
+
+        return sb.ToString();
+    }
+
+    // 匹配 <b> / </b>（含大写、带空格等变体）。
+    private static readonly Regex BoldTokenRegex = new(@"</?[bB]\s*>", RegexOptions.Compiled);
+
+    /// <summary>
+    /// 原样写出普通文本，但遇到换行标签时把仍然打开的 &lt;b&gt; 关掉，
+    /// 避免模型漏写 &lt;/b&gt; 时加粗范围一直蔓延下去。
+    /// </summary>
+    private static void AppendPlainText(StringBuilder sb, string text, ref bool open)
+    {
+        if (string.IsNullOrEmpty(text))
+            return;
+
+        var start = 0;
+        while (true)
+        {
+            var br = text.IndexOf("<br", start, StringComparison.OrdinalIgnoreCase);
+            if (br < 0)
+                break;
+
+            var gt = text.IndexOf('>', br);
+            if (gt < 0)
+                break;
+
+            sb.Append(text, start, br - start);
+            if (open)
+            {
+                sb.Append("</b>");
+                open = false;
+            }
+
+            sb.Append(text, br, gt + 1 - br);
+            start = gt + 1;
+        }
+
+        sb.Append(text, start, text.Length - start);
+    }
 
     /// <summary>
     /// 演员简介翻译的目标语言：优先用条目的元数据语言，没有则用简体中文
