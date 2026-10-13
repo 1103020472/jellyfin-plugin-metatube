@@ -238,6 +238,22 @@ public class PluginConfiguration : BasePluginConfiguration
     [MaxValue(32)]
 #endif
     public int MaxTranslationConcurrency { get; set; } = 5;
+
+    /// <summary>
+    /// 单次请求 MetaTube 服务端的超时时间（秒），默认 600（10 分钟）。
+    ///
+    /// 调用的主要是翻译接口，而翻译走大模型：单次摘要/评论分片在推理模型上
+    /// 可能要几十秒到数分钟。HttpClient 默认 100 秒会导致请求被中途取消而整段翻译失败。
+    /// 改动后**无需重启**，下一次请求就按新值计时。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("API request timeout")]
+    [Description(
+        "Timeout in seconds for a single MetaTube server request. Default 600. Translation runs on an LLM and can take minutes.")]
+    [MinValue(1)]
+    [MaxValue(7200)]
+#endif
+    public int RequestTimeoutSeconds { get; set; } = 600;
     
     // 标题已经包含中文时，认为已经翻译过了
 #if __EMBY__

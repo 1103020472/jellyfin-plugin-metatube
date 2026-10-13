@@ -242,6 +242,11 @@
                                 <input id="txtMaxTranslationConcurrency" is="emby-input" name="txtMaxTranslationConcurrency" type="number" min="1" max="32"/>
                                 <div class="fieldDescription">同时发起的翻译请求数上限，默认5。改完无需重启即时生效；调大更快但可能触发翻译服务限流。</div>
                             </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtRequestTimeoutSeconds">接口超时时间(秒):</label>
+                                <input id="txtRequestTimeoutSeconds" is="emby-input" name="txtRequestTimeoutSeconds" type="number" min="1" max="7200"/>
+                                <div class="fieldDescription">单次请求MetaTube服务端的超时时间，默认600秒(10分钟)。翻译走大模型可能耗时数分钟，改完无需重启。</div>
+                            </div>
                             <div class="checkboxContainer checkboxContainer-withDescription">
                                 <label class="emby-checkbox-label">
                                     <input id="chkEnableCheck" is="emby-checkbox" name="chkEnableCheck" type="checkbox"/>
@@ -408,6 +413,7 @@
                 $('#txtOpenAiModel', page).val(config.OpenAiModel).change();
                 $('#txtMaxChunkSize', page).val(config.MaxChunkSize).change();
                 $('#txtMaxTranslationConcurrency', page).val(config.MaxTranslationConcurrency).change();
+                $('#txtRequestTimeoutSeconds', page).val(config.RequestTimeoutSeconds).change();
                 page.querySelector('#chkEnableCheck').checked = config.EnableCheck;
                 page.querySelector('#chkReviewSwitch').checked = config.ReviewSwitch;
                 page.querySelector('#chkFullReviewRefresh').checked = config.FullReviewRefresh;
@@ -455,6 +461,7 @@
                 config.OpenAiModel = $('#txtOpenAiModel', form).val();
                 config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
                 config.MaxTranslationConcurrency = $('#txtMaxTranslationConcurrency', form).val();
+                config.RequestTimeoutSeconds = $('#txtRequestTimeoutSeconds', form).val();
                 config.EnableCheck = $('#chkEnableCheck', form).prop('checked');
                 config.ReviewSwitch = $('#chkReviewSwitch', form).prop('checked');
                 config.FullReviewRefresh = $('#chkFullReviewRefresh', form).prop('checked');

@@ -133,11 +133,14 @@ public static class ApiClient
     {
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("User-Agent", DefaultUserAgent);
-        var response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+        // 每个请求独立的超时（配置可调），外部取消仍能立刻打断。
+        using var cts = CreateRequestContext(cancellationToken);
+        var response = await HttpClient.SendAsync(request, cts.Token).ConfigureAwait(false);
 #if __EMBY__
         return new HttpResponseInfo
         {
-            Content = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
+            Content = await response.Content.ReadAsStreamAsync(cts.Token).ConfigureAwait(false),
             ContentLength = response.Content.Headers.ContentLength,
             ContentType = response.Content.Headers.ContentType?.ToString(),
             StatusCode = response.StatusCode,
@@ -253,13 +256,18 @@ public static class ApiClient
             request.Headers.Authorization =
                 new AuthenticationHeaderValue("Bearer", Plugin.Instance.Configuration.Token);
 
-        var response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        // 本次请求的超时（配置可调）+ 外部取消联动。
+        // 必须覆盖到读取响应体的那一步：翻译的耗时大头在服务端推理，
+        // 若只给 SendAsync 设超时，响应头已到但正文还没生成完时不会被判超时。
+        using var cts = CreateRequestContext(cancellationToken);
+
+        var response = await HttpClient.SendAsync(request, cts.Token).ConfigureAwait(false);
 
         // Nullable forgiving reason:
         // Response is unlikely to be null.
         // If it happens to be null, an exception is planed to be thrown either way.
         var apiResponse = (await response.Content!
-            .ReadFromJsonAsync<ResponseInfo<T>>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+            .ReadFromJsonAsync<ResponseInfo<T>>(cancellationToken: cts.Token).ConfigureAwait(false))!;
 
         // EnsureSuccessStatusCode ignoring reason:
         // When the status is unsuccessful, the API response contains error details.
@@ -278,6 +286,26 @@ public static class ApiClient
     private static readonly HttpClient HttpClient;
     private static string DefaultUserAgent => $"{Plugin.Instance.Name}/{Plugin.Instance.Version}";
 
+    /// <summary>配置留空/非法时使用的默认请求超时（秒），与旧版本写死的 10 分钟一致。</summary>
+    public const int DefaultRequestTimeoutSeconds = 600;
+
+    /// <summary>
+    /// 当前生效的请求超时。取配置值并做安全夹取（1 秒 ~ 2 小时），避免填 0 或负数导致立即超时。
+    /// 每次请求都会重新读取，所以改配置无需重启。
+    /// </summary>
+    private static TimeSpan RequestTimeout
+    {
+        get
+        {
+            var seconds = Plugin.Instance.Configuration.RequestTimeoutSeconds;
+            if (seconds <= 0)
+                seconds = DefaultRequestTimeoutSeconds;
+
+            // 上限 2 小时：留足大模型长文推理的时间，同时防止误填超大值把请求永久挂住。
+            return TimeSpan.FromSeconds(Math.Clamp(seconds, 1, 7200));
+        }
+    }
+
     static ApiClient()
     {
         HttpClient = new HttpClient(new SocketsHttpHandler
@@ -295,13 +323,27 @@ public static class ApiClient
             PooledConnectionIdleTimeout = TimeSpan.FromSeconds(90)
         })
         {
-            // 整体请求超时（含等待服务端响应）。HttpClient 的默认值是 100 秒，
-            // 而翻译走的是大模型：单次摘要/评论分片在推理模型上可能要几十秒到数分钟，
-            // 默认值会导致 "The request was canceled due to the configured
-            // HttpClient.Timeout of 100 seconds elapsing" 而整段翻译失败。
-            // 这里放宽到 10 分钟（连接超时仍由上面的 ConnectTimeout 单独控制，30 秒）。
-            Timeout = TimeSpan.FromMinutes(10)
+            // 整体请求超时固定为"无限"，真正的超时改由每次请求独立的 CancellationTokenSource 控制
+            // （见 CreateRequestContext）。
+            //
+            // 为什么不直接给 HttpClient.Timeout 赋值：它是全局的，一旦有请求在途，
+            // 再改这个属性会抛 InvalidOperationException；而且改完只对新请求生效，
+            // 无法做到"每个请求各用各的超时"。用 per-request CTS 才能既动态生效又互不干扰。
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan
         };
+    }
+
+    /// <summary>
+    /// 为单次请求创建「外部取消 + 配置超时」联动的令牌。
+    ///
+    /// 返回的 CTS 必须在请求结束后释放（调用方用 using）。
+    /// 外部令牌取消时（例如用户取消任务）也会立即取消本次请求，不会干等超时。
+    /// </summary>
+    private static CancellationTokenSource CreateRequestContext(CancellationToken cancellationToken)
+    {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(RequestTimeout);
+        return cts;
     }
 
     #endregion

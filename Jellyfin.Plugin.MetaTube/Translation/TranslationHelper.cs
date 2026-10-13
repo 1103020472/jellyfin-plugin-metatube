@@ -1098,9 +1098,19 @@ public static class TranslationHelper
             {
                 return await func();
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // 用户取消刮削，继续重试没有意义。
+                // 用户/上层主动取消（例如任务被停止），继续重试没有意义。
+                throw;
+            }
+            catch (OperationCanceledException e)
+            {
+                // 走到这里说明不是外部取消，而是**请求超时**：
+                // ApiClient 用 per-request CTS 的 CancelAfter 实现超时，
+                // 超时表现为 OperationCanceledException，但外部 token 并没有被取消。
+                // 这类错误必须打日志，否则超时会表现为"翻译无声无息地失败"，极难排查。
+                // 不重试：超时通常意味着这一片就是慢，重试只会再等一个完整的超时。
+                LogWarn("Translate timeout ({0}) after {1} attempt(s): {2}", context, attempt, e.Message);
                 throw;
             }
             catch (Exception e) when (IsNonRetryable(e) || attempt >= retryCount)
