@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         4k2论坛帖子缩略图 + Emby检测（最终稳定版）
 // @namespace    http://tampermonkey.net/
-// @version      7.5
+// @version      7.6
 // @match        https://4k2.me/*
 // @match        https://4k2.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
 // @connect      4k2.me
 // @connect      4k2.com
 // @connect      bocecdn.com
@@ -23,8 +24,10 @@
         EMBY_API_KEY: "70952dc783d640099742ca18114ecdeb",
     };
 
-    const CODE_REGEX = /[A-Za-z]{3,7}-\d{3,5}/;
-    const CODE_GLOBAL_REGEX = /[A-Za-z]{3,7}-\d{3,5}/g;
+    // 番号形如 CJVR-071 / URVRSP-614 / 3DSVR-2015。
+    // 前缀允许以数字开头（3DSVR、4KVR 之类），否则 "3DSVR-2015" 会被截成 "DSVR-2015"。
+    const CODE_REGEX = /[A-Za-z0-9]{3,8}-\d{3,5}/;
+    const CODE_GLOBAL_REGEX = /[A-Za-z0-9]{3,8}-\d{3,5}/g;
 
     let isBatchProcessing = false;
     // 仅保存在当前页面内存中；刷新页面会自然清空。
@@ -65,6 +68,38 @@
 
     const pendingMap = new Map();
 
+    // 4k2 的番号带前置数字（3DSVR-2015），但 Emby 里统一存成了去掉数字的 DSVR-2015，
+    // 直接拿 3DSVR-2015 去搜只会模糊命中、标题里并不含该串，必须再去掉前置数字搜一次。
+    function embySearchAliases(code) {
+        const aliases = [code];
+        const stripped = code.replace(/^\d+/, '');
+        if (stripped !== code && /^[A-Za-z]{3,8}-\d{3,5}$/.test(stripped)) {
+            aliases.push(stripped);
+        }
+        return aliases;
+    }
+
+    async function findEmbyMovie(alias) {
+        const res = await GM_xmlhttpRequestPromise({
+            method: "GET",
+            url: `${CONFIG.EMBY_BASE_URL}/emby/Items?IncludeItemTypes=Movie&Recursive=true&SearchTerm=${encodeURIComponent(alias)}`,
+            headers: {
+                "X-Emby-Token": CONFIG.EMBY_API_KEY,
+                "Accept": "application/json"
+            }
+        });
+
+        const data = JSON.parse(res.responseText);
+        // Emby 的 SearchTerm 是模糊搜索；只认标题中实际包含番号的条目，
+        // 避免把仅因年份/描述命中的影片误判为该番号。
+        const normalizedCode = alias.toUpperCase();
+        return (data.Items || []).find(item =>
+            [item.Name, item.OriginalTitle].some(title =>
+                typeof title === 'string' && title.toUpperCase().includes(normalizedCode)
+            )
+        ) || null;
+    }
+
     async function queryEmbyMovie(code) {
         if (!code || !CONFIG.EMBY_API_KEY) {
             return { exists: false, hasSubtitle: false };
@@ -80,25 +115,17 @@
 
         const promise = enqueue(async () => {
             try {
-                const res = await GM_xmlhttpRequestPromise({
-                    method: "GET",
-                    url: `${CONFIG.EMBY_BASE_URL}/emby/Items?IncludeItemTypes=Movie&Recursive=true&SearchTerm=${encodeURIComponent(code)}`,
-                    headers: {
-                        "X-Emby-Token": CONFIG.EMBY_API_KEY,
-                        "Accept": "application/json"
-                    }
-                });
-
-                const data = JSON.parse(res.responseText);
-                // Emby 的 SearchTerm 是模糊搜索；只认标题中实际包含番号的条目，
-                // 避免把仅因年份/描述命中的影片误判为该番号。
-                const normalizedCode = code.toUpperCase();
-                const movie = (data.Items || []).find(item =>
-                    [item.Name, item.OriginalTitle].some(title =>
-                        typeof title === 'string' && title.toUpperCase().includes(normalizedCode)
-                    )
-                );
-                if (!movie) return { exists: false, hasSubtitle: false };
+                let movie = null;
+                for (const alias of embySearchAliases(code)) {
+                    movie = await findEmbyMovie(alias);
+                    if (movie) break;
+                }
+                if (!movie) {
+                    // 负结果也缓存：同一页面里徽标检查与后续批量流程会重复问同一个番号。
+                    const miss = { exists: false, hasSubtitle: false };
+                    embyCache.set(code, miss);
+                    return miss;
+                }
 
                 let hasSubtitle = false;
 
@@ -828,12 +855,606 @@
     }
 
 
+    // ================= VR影像（forum-27）：一键复制直链 =================
+    //
+    // 流程：只针对「Emby 中不存在」的番号，逐个进详情页解析 down.772.one 直链，
+    // 剔除「Y:\光鸭云盘\未同步」里已下载过的文件，结果缓存到按钮上；
+    // 再次点击按钮弹出二次交互弹框，按番号维度展示直链 + 封面缩略图（悬浮看大图），
+    // 勾选后一键复制为纯 URL 文本。
+
+    const VR_FORUM_ID = '27';
+    // 「未同步」目录的文件名清单（浏览器读不到本地盘，必须由用户选一次目录后缓存）。
+    const VR_DOWNLOADED_KEY = '4k2-vr-downloaded-files';
+    const MEDIA_EXT_REGEX = /\.(?:mp4|mkv|mov|avi|wmv|flv|m2ts|ts)(?:\?.*)?$/i;
+    const IMAGE_EXT_REGEX = /\.(?:jpe?g|png|gif|webp|bmp)(?:\?.*)?$/i;
+    // 直链域名以后可能变，主要靠扩展名识别，这里只作为兜底提示。
+    const VR_LINK_HOST_HINT = /772\.one/i;
+
+    let vrLinkCache = null;       // 提取结果，仅当前页面内存；刷新页面自然清空
+    let vrDownloadedSet = null;   // 已下载文件名集合（小写）
+    let vrDownloadedMeta = null;  // { count, at }
+    let isVrExtracting = false;
+    let vrPreviewEl = null;
+
+    function isVrImageForumList() {
+        if (/forum-27-\d+\.html/.test(location.pathname)) return true;
+        const params = new URLSearchParams(location.search);
+        return params.get('mod') === 'forumdisplay' && params.get('fid') === VR_FORUM_ID;
+    }
+
+    function toAbsoluteUrl(url, base) {
+        if (!url) return null;
+        try {
+            return new URL(url, base).href;
+        } catch {
+            return null;
+        }
+    }
+
+    function fileNameOfUrl(url) {
+        try {
+            const path = new URL(url).pathname;
+            return decodeURIComponent(path.split('/').filter(Boolean).pop() || '').toLowerCase();
+        } catch {
+            return '';
+        }
+    }
+
+    function isDirectMediaLink(url) {
+        if (!/^https?:\/\//i.test(url)) return false;
+        // 排除论坛自身域名与图床，避免把附件页/图片当成直链。
+        if (/4k2\.(?:me|com)|bocecdn\.com/i.test(url)) return false;
+        return MEDIA_EXT_REGEX.test(url) || VR_LINK_HOST_HINT.test(url);
+    }
+
+    // CJVR-071 -> cjvr00071（详情页文件名里的番号形态）
+    function normalizeVrCode(code) {
+        const parts = String(code).toUpperCase().split('-');
+        const num = parts.pop() || '';
+        return (parts.join('') + num.padStart(5, '0')).toLowerCase();
+    }
+
+    function isVrDownloaded(url) {
+        if (!vrDownloadedSet || !vrDownloadedSet.size) return false;
+        const name = fileNameOfUrl(url);
+        return !!name && vrDownloadedSet.has(name);
+    }
+
+    function loadVrDownloadedSet() {
+        if (vrDownloadedSet) return true;
+        try {
+            const saved = JSON.parse(localStorage.getItem(VR_DOWNLOADED_KEY) || 'null');
+            if (saved && Array.isArray(saved.files)) {
+                vrDownloadedSet = new Set(saved.files.map(name => String(name).toLowerCase()));
+                vrDownloadedMeta = { count: saved.files.length, at: saved.at || 0 };
+                updateVrDirButtonLabel();
+                return true;
+            }
+        } catch {}
+        return false;
+    }
+
+    function saveVrDownloadedSet(names) {
+        vrDownloadedSet = new Set(names);
+        vrDownloadedMeta = { count: names.length, at: Date.now() };
+        try {
+            localStorage.setItem(VR_DOWNLOADED_KEY, JSON.stringify({
+                files: [...vrDownloadedSet],
+                at: vrDownloadedMeta.at
+            }));
+        } catch {}
+        updateVrDirButtonLabel();
+    }
+
+    // 用目录选择器读取「未同步」目录：只取文件名，不读文件内容。
+    // 注意：必须在用户点击的同步调用链里触发，否则浏览器会拦截。
+    function pickVrUnsyncedDir(onDone) {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.webkitdirectory = true;
+        input.multiple = true;
+        input.style.display = 'none';
+
+        let settled = false;
+        const finish = names => {
+            if (settled) return;
+            settled = true;
+            input.remove();
+            if (names && names.length) {
+                saveVrDownloadedSet(names);
+            }
+            if (typeof onDone === 'function') onDone(!!(names && names.length));
+        };
+
+        input.addEventListener('change', () => {
+            const names = Array.from(input.files || []).map(file => file.name.toLowerCase());
+            finish(names);
+        });
+        input.addEventListener('cancel', () => finish(null));
+
+        document.body.appendChild(input);
+        input.click();
+    }
+
+    function parseVrThreadLinks(html, threadUrl, codeInfos) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const post = doc.querySelector('#postlist td.t_f, #postlist div[id^="postmessage_"], #postlist .t_f');
+        const cover = pickVrCover(post || doc.querySelector('#postlist') || doc, threadUrl);
+
+        const seen = new Set();
+        const groups = new Map();
+        const fallback = codeInfos.find(info => !info.exists) || codeInfos[0];
+        let skipped = 0;
+
+        // 直链在正文里是普通 <a>，只能用 DOM 解析；用正则扫 HTML 会漏掉
+        // 路径段里含 g 等字符的链接（如 swxd8egl/kiwvr00911_1_8k.mp4）。
+        (post || doc).querySelectorAll('a[href]').forEach(anchor => {
+            const url = toAbsoluteUrl(anchor.getAttribute('href'), threadUrl);
+            if (!url || !isDirectMediaLink(url) || seen.has(url)) return;
+            seen.add(url);
+
+            const name = fileNameOfUrl(url);
+            const owner = codeInfos.find(info => name.includes(normalizeVrCode(info.code)));
+            // 该番号 Emby 里已有，交给原有脚本逻辑，不在这里处理。
+            if (owner && owner.exists) return;
+            // 已经在「未同步」里下过的，不重复提取。
+            if (isVrDownloaded(url)) {
+                skipped++;
+                return;
+            }
+
+            const code = owner ? owner.code : fallback.code;
+            if (!groups.has(code)) groups.set(code, { code, links: [] });
+            groups.get(code).links.push(url);
+        });
+
+        return { cover, groups: [...groups.values()], skipped };
+    }
+
+    function pickVrCover(root, threadUrl) {
+        const candidates = [];
+        Array.from(root.querySelectorAll('img')).forEach(img => {
+            if (!img || img.classList.contains('user_avatar')) return;
+            const raw = img.getAttribute('file') || img.getAttribute('zoomfile') ||
+                img.getAttribute('data-original') || img.getAttribute('src');
+            const url = toAbsoluteUrl(raw, threadUrl);
+            if (!url || !/^https?:\/\//i.test(url)) return;
+            if (/4k2\.(?:me|com)|uc_server|static\/image/i.test(url)) return;
+            if (!IMAGE_EXT_REGEX.test(url)) return;
+            candidates.push(url.replace(/^http:/i, 'https:'));
+        });
+        return candidates[0] || null;
+    }
+
+    function showVrToast(message, ms = 8000) {
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;top:16px;right:16px;z-index:100003;background:#212529;color:#fff;' +
+            'padding:10px 14px;border-radius:6px;font:13px/1.5 sans-serif;box-shadow:0 6px 24px #0007;max-width:380px;';
+        el.textContent = message;
+        document.body.appendChild(el);
+        setTimeout(() => el.remove(), ms);
+    }
+
+    function onVrDirectLinkClick(button) {
+        if (vrLinkCache !== null) {
+            if (vrLinkCache.length) showVrLinkPicker(vrLinkCache);
+            else alert('本页上次提取结果为 0 条直链。刷新页面后才会重新提取。');
+            return;
+        }
+        if (isVrExtracting) return;
+
+        if (!loadVrDownloadedSet()) {
+            // 首次使用：先让用户选一次「未同步」目录（同步触发，保留用户手势）。
+            button.textContent = '[请选择「未同步」目录]';
+            pickVrUnsyncedDir(picked => {
+                button.textContent = '[一键复制直链]';
+                if (picked) collectVrDirectLinks(button);
+                else alert('未读取到「未同步」目录，直链提取已取消。');
+            });
+            return;
+        }
+
+        collectVrDirectLinks(button);
+    }
+
+    async function collectVrDirectLinks(button) {
+        if (isVrExtracting) return;
+        isVrExtracting = true;
+        button.disabled = true;
+        button.style.background = '#6c757d';
+
+        let finished = false;
+        try {
+            const rows = getForumThreadRows().filter(row => !/^stickthread_/.test(row.id));
+            const targets = [];
+
+            // 第一轮：查 Emby，只留下不存在的番号。
+            for (let index = 0; index < rows.length; index++) {
+                const row = rows[index];
+                const subject = row.querySelector('.km_subject');
+                const titleLink = row.querySelector('a.kmtit[href*="thread-"]');
+                if (!subject || !titleLink) continue;
+
+                const codes = [...new Set((subject.textContent.toUpperCase().match(CODE_GLOBAL_REGEX) || []))];
+                if (!codes.length) continue;
+
+                button.textContent = `[检查 Emby ${index + 1}/${rows.length}]`;
+                const results = await Promise.all(codes.map(code => queryEmbyMovie(code)));
+                const codeInfos = codes.map((code, i) => ({ code, exists: !!(results[i] && results[i].exists) }));
+                if (!codeInfos.some(info => !info.exists)) continue;
+
+                targets.push({
+                    codeInfos,
+                    title: (subject.textContent || '').replace(/\s+/g, ' ').trim(),
+                    threadUrl: titleLink.href
+                });
+            }
+
+            let skippedDownloaded = 0;
+            const byCode = new Map();
+
+            // 第二轮：逐个详情页提取直链。
+            for (let index = 0; index < targets.length; index++) {
+                const target = targets[index];
+                button.textContent = `[读取详情 ${index + 1}/${targets.length}]`;
+                let response;
+                try {
+                    response = await requestForum({ method: 'GET', url: target.threadUrl });
+                    if (response.status < 200 || response.status >= 400) throw new Error(`HTTP ${response.status}`);
+                } catch (error) {
+                    console.warn('[4k2直链] 详情页读取失败:', target.threadUrl, error);
+                    continue;
+                }
+
+                const parsed = parseVrThreadLinks(response.responseText, target.threadUrl, target.codeInfos);
+                skippedDownloaded += parsed.skipped;
+                parsed.groups.forEach(group => {
+                    const previous = byCode.get(group.code);
+                    if (previous) {
+                        group.links.forEach(link => {
+                            if (!previous.links.includes(link)) previous.links.push(link);
+                        });
+                        if (!previous.cover) previous.cover = parsed.cover;
+                    } else {
+                        byCode.set(group.code, {
+                            code: group.code,
+                            title: target.title,
+                            threadUrl: target.threadUrl,
+                            cover: parsed.cover,
+                            links: group.links.slice()
+                        });
+                    }
+                });
+            }
+
+            const groups = [...byCode.values()]
+                .filter(group => group.links.length)
+                .sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true, sensitivity: 'base' }));
+            const totalLinks = groups.reduce((sum, group) => sum + group.links.length, 0);
+
+            vrLinkCache = groups;
+            finished = true;
+
+            if (!groups.length) {
+                button.textContent = '[一键复制直链]';
+                alert(`提取完成：共 ${targets.length} 个番号不在 Emby，没有需要提取的直链` +
+                    (skippedDownloaded ? `（已下载 ${skippedDownloaded} 条，已跳过）。` : '。'));
+                return;
+            }
+
+            button.textContent = `[提取完成 ${groups.length}番号/${totalLinks}直链 · 点此查看]`;
+            button.style.background = '#28a745';
+            showVrToast(`直链提取完成：${groups.length} 个番号 / ${totalLinks} 条直链` +
+                (skippedDownloaded ? `，已跳过 ${skippedDownloaded} 条已下载` : '') + '。再次点击按钮查看。');
+        } finally {
+            isVrExtracting = false;
+            button.disabled = false;
+            if (!finished) button.style.background = '#6f42c1';
+        }
+    }
+
+    // ---------- 二次交互弹框 ----------
+
+    function ensureVrCoverPreview() {
+        if (vrPreviewEl) return vrPreviewEl;
+        vrPreviewEl = document.createElement('div');
+        vrPreviewEl.id = '4k2-vr-cover-preview';
+        vrPreviewEl.style.cssText = 'position:fixed;z-index:100002;display:none;pointer-events:none;' +
+            'background:#fff;border:1px solid #999;box-shadow:0 6px 24px #0007;padding:4px;border-radius:4px;';
+        const img = document.createElement('img');
+        img.style.cssText = 'display:block;max-width:460px;max-height:460px;';
+        vrPreviewEl.appendChild(img);
+        document.body.appendChild(vrPreviewEl);
+        return vrPreviewEl;
+    }
+
+    function positionVrCoverPreview(anchorEl) {
+        if (!vrPreviewEl || vrPreviewEl.style.display === 'none') return;
+        const rect = anchorEl.getBoundingClientRect();
+        const box = vrPreviewEl.getBoundingClientRect();
+        let left = rect.right + 12;
+        if (left + box.width > window.innerWidth - 8) left = Math.max(8, rect.left - box.width - 12);
+        let top = rect.top;
+        if (top + box.height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - box.height - 8);
+        vrPreviewEl.style.left = `${left}px`;
+        vrPreviewEl.style.top = `${top}px`;
+    }
+
+    function showVrCoverPreview(src, anchorEl) {
+        if (!src) return;
+        const box = ensureVrCoverPreview();
+        const img = box.firstElementChild;
+        const reveal = () => {
+            if (img.getAttribute('src') !== src) return; // 鼠标已移到别的封面
+            box.style.display = 'block';
+            positionVrCoverPreview(anchorEl);
+        };
+        img.onload = reveal;
+        img.onerror = () => { box.style.display = 'none'; };
+        if (img.getAttribute('src') !== src) {
+            // 加载完成前不显示，否则会先闪一个只有内边距的空框。
+            box.style.display = 'none';
+            img.src = src;
+        }
+        if (img.complete && img.naturalWidth) reveal();
+    }
+
+    function hideVrCoverPreview() {
+        if (vrPreviewEl) vrPreviewEl.style.display = 'none';
+    }
+
+    function copyTextToClipboard(text) {
+        // GM_setClipboard 不依赖页面焦点，最稳，优先使用；没有时再退回浏览器剪贴板 API。
+        if (typeof GM_setClipboard === 'function') {
+            try {
+                GM_setClipboard(text, 'text');
+                return Promise.resolve(true);
+            } catch {}
+        }
+        return navigator.clipboard.writeText(text).then(() => true).catch(() => {
+            try {
+                const area = document.createElement('textarea');
+                area.value = text;
+                area.style.cssText = 'position:fixed;left:-9999px;top:0;';
+                document.body.appendChild(area);
+                area.select();
+                const ok = document.execCommand('copy');
+                area.remove();
+                return ok;
+            } catch {
+                return false;
+            }
+        });
+    }
+
+    function showVrLinkPicker(groups) {
+        document.getElementById('4k2-vr-link-picker')?.remove();
+        hideVrCoverPreview();
+
+        const totalLinks = groups.reduce((sum, group) => sum + group.links.length, 0);
+        const overlay = document.createElement('div');
+        overlay.id = '4k2-vr-link-picker';
+        overlay.style.cssText = 'position:fixed;inset:0;background:#0009;z-index:100000;display:flex;' +
+            'align-items:center;justify-content:center;padding:20px;';
+
+        const panel = document.createElement('div');
+        panel.style.cssText = 'background:#fff;color:#222;width:min(920px,96vw);max-height:88vh;display:flex;' +
+            'flex-direction:column;border-radius:8px;padding:16px;box-shadow:0 8px 32px #0006;font:14px/1.5 sans-serif;';
+
+        const heading = document.createElement('h3');
+        heading.textContent = `VR影像直链：${groups.length} 个番号 / ${totalLinks} 条直链`;
+        heading.style.margin = '0 0 6px';
+
+        const hint = document.createElement('div');
+        hint.style.cssText = 'color:#666;font-size:12px;margin-bottom:10px;';
+        hint.textContent = '勾选番号后点“复制”即可把对应直链逐行写入剪贴板；鼠标悬停封面小图可看大图。';
+
+        const toolbar = document.createElement('div');
+        toolbar.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;';
+        const summary = document.createElement('span');
+        summary.style.cssText = 'color:#444;font-size:13px;';
+        const selectAll = document.createElement('button');
+        selectAll.textContent = '全选';
+        const selectNone = document.createElement('button');
+        selectNone.textContent = '全不选';
+        [selectAll, selectNone].forEach(btn => {
+            btn.style.cssText = 'background:#eee;border:1px solid #ccc;border-radius:4px;padding:4px 10px;cursor:pointer;';
+        });
+        toolbar.append(selectAll, selectNone, summary);
+
+        const list = document.createElement('div');
+        list.style.cssText = 'flex:1;overflow:auto;border:1px solid #ddd;border-radius:4px;';
+
+        const entries = [];
+        const updateSummary = () => {
+            const selected = entries.filter(entry => entry.input.checked);
+            const links = selected.reduce((sum, entry) => sum + entry.group.links.length, 0);
+            summary.textContent = `已选 ${selected.length}/${entries.length} 个番号，共 ${links} 条直链`;
+        };
+
+        groups.forEach(group => {
+            const card = document.createElement('div');
+            card.className = 'vr-link-card';
+            card.dataset.code = group.code;
+            card.style.cssText = 'display:flex;gap:12px;padding:10px;border-bottom:1px solid #eee;';
+
+            const thumbWrap = document.createElement('div');
+            thumbWrap.style.cssText = 'flex:0 0 96px;';
+            if (group.cover) {
+                const thumb = document.createElement('img');
+                thumb.src = group.cover;
+                thumb.loading = 'lazy';
+                thumb.referrerPolicy = 'no-referrer';
+                thumb.style.cssText = 'width:96px;max-height:130px;object-fit:cover;border:1px solid #ccc;' +
+                    'border-radius:3px;cursor:zoom-in;background:#f5f5f5;';
+                thumb.addEventListener('mouseenter', () => showVrCoverPreview(group.cover, thumb));
+                thumb.addEventListener('mouseleave', hideVrCoverPreview);
+                thumbWrap.appendChild(thumb);
+            } else {
+                const empty = document.createElement('div');
+                empty.textContent = '无封面';
+                empty.style.cssText = 'width:96px;height:70px;display:flex;align-items:center;justify-content:center;' +
+                    'border:1px dashed #ccc;border-radius:3px;color:#999;font-size:12px;';
+                thumbWrap.appendChild(empty);
+            }
+
+            const body = document.createElement('div');
+            body.style.cssText = 'flex:1;min-width:0;';
+
+            const header = document.createElement('label');
+            header.style.cssText = 'display:flex;align-items:center;gap:8px;cursor:pointer;';
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.checked = true;
+            input.addEventListener('change', updateSummary);
+            const codeText = document.createElement('strong');
+            codeText.textContent = group.code;
+            codeText.style.cssText = 'white-space:nowrap;';
+            const countText = document.createElement('span');
+            countText.textContent = `${group.links.length} 条`;
+            countText.style.cssText = 'color:#c62828;font-size:12px;white-space:nowrap;';
+            const titleText = document.createElement('span');
+            titleText.textContent = group.title || '';
+            titleText.style.cssText = 'flex:1;min-width:0;color:#888;font-size:12px;overflow:hidden;' +
+                'text-overflow:ellipsis;white-space:nowrap;';
+            header.append(input, codeText, countText, titleText);
+
+            const linkBox = document.createElement('div');
+            linkBox.style.cssText = 'margin-top:6px;display:flex;flex-direction:column;gap:2px;';
+            group.links.forEach(link => {
+                const anchor = document.createElement('a');
+                anchor.href = link;
+                anchor.target = '_blank';
+                anchor.rel = 'noopener';
+                anchor.textContent = link;
+                anchor.style.cssText = 'font:12px/1.5 Consolas,Menlo,monospace;color:#0066cc;word-break:break-all;';
+                linkBox.appendChild(anchor);
+            });
+
+            body.append(header, linkBox);
+            card.append(thumbWrap, body);
+            list.appendChild(card);
+            entries.push({ group, input, card });
+        });
+
+        selectAll.onclick = () => {
+            entries.forEach(entry => { entry.input.checked = true; });
+            updateSummary();
+        };
+        selectNone.onclick = () => {
+            entries.forEach(entry => { entry.input.checked = false; });
+            updateSummary();
+        };
+
+        const status = document.createElement('div');
+        status.style.cssText = 'margin-top:8px;color:#555;font-size:12px;white-space:pre-wrap;';
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px;';
+        const repick = document.createElement('button');
+        repick.textContent = '重选未同步目录';
+        repick.style.cssText = 'margin-right:auto;background:#eee;border:1px solid #ccc;border-radius:4px;padding:8px 12px;cursor:pointer;';
+        repick.onclick = () => pickVrUnsyncedDir(picked => {
+            if (!picked || !vrLinkCache) return;
+            // 重新按新的已下载清单过滤，已经下过的不再展示。
+            const filtered = vrLinkCache
+                .map(group => ({ ...group, links: group.links.filter(link => !isVrDownloaded(link)) }))
+                .filter(group => group.links.length);
+            vrLinkCache = filtered;
+            if (filtered.length) {
+                showVrLinkPicker(filtered);
+            } else {
+                overlay.remove();
+                alert('按新的「未同步」清单过滤后，已没有剩余直链。');
+            }
+        });
+
+        const close = document.createElement('button');
+        close.textContent = '关闭';
+        close.style.cssText = 'background:#eee;border:1px solid #ccc;border-radius:4px;padding:8px 14px;cursor:pointer;';
+        close.onclick = () => overlay.remove();
+
+        const copy = document.createElement('button');
+        copy.textContent = '复制';
+        copy.style.cssText = 'background:#6f42c1;color:#fff;border:0;border-radius:4px;padding:8px 18px;' +
+            'cursor:pointer;font-weight:bold;';
+        copy.onclick = async () => {
+            const selected = entries.filter(entry => entry.input.checked);
+            if (!selected.length) {
+                alert('请至少勾选一个番号。');
+                return;
+            }
+            const text = selected.flatMap(entry => entry.group.links).join('\n');
+            const linkCount = selected.reduce((sum, entry) => sum + entry.group.links.length, 0);
+            const ok = await copyTextToClipboard(text);
+            status.textContent = ok
+                ? `已复制 ${selected.length} 个番号、${linkCount} 条直链到剪贴板。`
+                : '复制失败：浏览器剪贴板权限受限，请手动选中链接复制。';
+            if (ok) {
+                copy.textContent = `已复制 ${linkCount} 条`;
+                setTimeout(() => { copy.textContent = '复制'; }, 2000);
+            }
+        };
+
+        actions.append(repick, close, copy);
+        panel.append(heading, hint, toolbar, list, status, actions);
+        overlay.appendChild(panel);
+        overlay.addEventListener('click', event => {
+            if (event.target === overlay) overlay.remove();
+        });
+        document.body.appendChild(overlay);
+        updateSummary();
+    }
+
+    function ensureVrDirectLinkButton() {
+        if (!isVrImageForumList() || document.getElementById('4k2-vr-directlink-btn')) return;
+        const btn = document.createElement('button');
+        btn.id = '4k2-vr-directlink-btn';
+        btn.textContent = '[一键复制直链]';
+        btn.style.cssText = 'position:fixed;top:214px;right:16px;background:#6f42c1;color:#fff;' +
+            'padding:9px 12px;border:0;border-radius:6px;cursor:pointer;z-index:9999;font-weight:bold;';
+        btn.onclick = () => onVrDirectLinkClick(btn);
+        document.body.appendChild(btn);
+        loadVrDownloadedSet();
+    }
+
+    function updateVrDirButtonLabel() {
+        const btn = document.getElementById('4k2-vr-dir-btn');
+        if (!btn) return;
+        btn.textContent = vrDownloadedMeta && vrDownloadedMeta.count
+            ? `[未同步 ${vrDownloadedMeta.count} 个文件]`
+            : '[选未同步目录]';
+    }
+
+    function ensureVrDirButton() {
+        if (!isVrImageForumList() || document.getElementById('4k2-vr-dir-btn')) return;
+        const btn = document.createElement('span');
+        btn.id = '4k2-vr-dir-btn';
+        btn.textContent = '[选未同步目录]';
+        btn.title = '选择 Y:\\光鸭云盘\\未同步 目录，用于排除已下载的直链';
+        btn.style.cssText = 'position:fixed;top:252px;right:16px;background:#6c757d;color:#fff;' +
+            'padding:6px 8px;border-radius:6px;cursor:pointer;z-index:9999;font-size:12px;';
+        btn.onclick = () => pickVrUnsyncedDir(picked => {
+            if (!picked) return;
+            if (!vrLinkCache) return;
+            const filtered = vrLinkCache
+                .map(group => ({ ...group, links: group.links.filter(link => !isVrDownloaded(link)) }))
+                .filter(group => group.links.length);
+            vrLinkCache = filtered;
+            showVrToast(`已更新「未同步」清单：${vrDownloadedMeta.count} 个文件，剩余 ${filtered.length} 个番号可提取。`);
+        });
+        document.body.appendChild(btn);
+        updateVrDirButtonLabel();
+    }
+
     // ================= 初始化 =================
 
     function init() {
         ensureGlobalToggleButton();
         ensureCopyMagnetsButton(); // 初始化复制按钮
         ensureSubtitleDownloadButton();
+        ensureVrDirectLinkButton();
+        ensureVrDirButton();
         processList();
 
         setTimeout(() => {
