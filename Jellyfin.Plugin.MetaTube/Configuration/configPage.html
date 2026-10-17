@@ -269,6 +269,58 @@
                             </div>
                             <div class="checkboxContainer checkboxContainer-withDescription">
                                 <label class="emby-checkbox-label">
+                                    <input id="chkEnableBackupTranslation" is="emby-checkbox" name="chkEnableBackupTranslation" type="checkbox"/>
+                                    <span>启用备用翻译（主通道返回拒答文案时自动切换）</span>
+                                </label>
+                                <div class="fieldDescription checkboxFieldDescription">主翻译通道返回「Sorry, I can't respond to this question」之类的拒答文案时，该次请求自动改用下方备用 OpenAI 参数重试（请求粒度切换，对上层无感）。备用通道固定走 OpenAI 兼容接口，api key 必填。</div>
+                            </div>
+                            <div id="backupTranslationSection" style="display: none;">
+                                <div class="selectContainer" style="margin-top: 0;">
+                                    <button id="btnBackupTranslationToggle" is="emby-button" type="button" class="raised button-alt" style="margin: 0;">
+                                        <span id="btnBackupTranslationToggleLabel">▶ 展开 Backup 翻译配置</span>
+                                    </button>
+                                    <div class="fieldDescription">备用通道平时不用，配置收在这里，展开后填写。</div>
+                                </div>
+                                <div id="backupTranslationFields" style="display: none;">
+                                    <div class="inputContainer">
+                                        <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiApiKey">Backup api key:</label>
+                                        <input id="txtBackupOpenAiApiKey" is="emby-input" name="txtBackupOpenAiApiKey" type="text"/>
+                                        <div class="fieldDescription"></div>
+                                    </div>
+                                    <div class="inputContainer">
+                                        <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiApiUrl">Backup api url:</label>
+                                        <input id="txtBackupOpenAiApiUrl" is="emby-input" name="txtBackupOpenAiApiUrl" type="text"/>
+                                        <div class="fieldDescription">Custom OpenAI-compatible api url. (optional)</div>
+                                    </div>
+                                    <div class="inputContainer">
+                                        <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiModel">Backup model:</label>
+                                        <input id="txtBackupOpenAiModel" is="emby-input" name="txtBackupOpenAiModel" type="text"/>
+                                        <div class="fieldDescription">Custom OpenAI-compatible api model. (optional)</div>
+                                    </div>
+                                    <div class="selectContainer">
+                                        <label class="selectLabel selectLabelText" for="selectBackupOpenAiTranslator">Backup translator:</label>
+                                        <select class="emby-select-withcolor emby-select" id="selectBackupOpenAiTranslator" is="emby-select" name="selectBackupOpenAiTranslator">
+                                            <option value="OpenAiTranslator">openai-translator（默认）</option>
+                                            <option value="GoOpenAi">go-openai（可配置思考度 / 最大 token）</option>
+                                        </select>
+                                        <div class="fieldDescription">备用通道的 OpenAI 客户端实现。选 go-openai 后，下面的"额外参数"和"最大 token"才会生效。</div>
+                                    </div>
+                                    <div class="selectBackupOpenAiTranslatorGoOpenAi" style="display: none;">
+                                        <div class="inputContainer">
+                                            <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiExtraParams">Backup 额外参数 (JSON):</label>
+                                            <input id="txtBackupOpenAiExtraParams" is="emby-input" name="txtBackupOpenAiExtraParams" type="text"/>
+                                            <div class="fieldDescription">合并进请求体的额外 JSON 字段，仅 go-openai 生效。例如 SiliconFlow：{"thinking_budget": 1}。</div>
+                                        </div>
+                                        <div class="inputContainer">
+                                            <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiMaxCompletionTokens">Backup 最大 token:</label>
+                                            <input id="txtBackupOpenAiMaxCompletionTokens" is="emby-input" name="txtBackupOpenAiMaxCompletionTokens" type="number" min="0"/>
+                                            <div class="fieldDescription">单次请求最多生成的 token 数（含思维链），默认 4096，仅 go-openai 生效。</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="checkboxContainer checkboxContainer-withDescription">
+                                <label class="emby-checkbox-label">
                                     <input id="chkEnableCheck" is="emby-checkbox" name="chkEnableCheck" type="checkbox"/>
                                     <span>标题已翻译时，跳过翻译</span>
                                 </label>
@@ -406,6 +458,29 @@
             $('.selectOpenAiTranslatorGoOpenAi').css('display', goOpenAi ? 'inherit' : 'none');
         });
 
+        // 备用翻译：开关只在启用时显示配置区；具体字段再由「展开/收起」二级控制，平时折叠。
+        $('#chkEnableBackupTranslation').on('change', function () {
+            $('#backupTranslationSection').css('display', this.checked ? 'inherit' : 'none');
+        });
+
+        $('#btnBackupTranslationToggle').on('click', function () {
+            var fields = $('#backupTranslationFields');
+            var hidden = fields.css('display') === 'none';
+            fields.css('display', hidden ? 'inherit' : 'none');
+            $('#btnBackupTranslationToggleLabel').text(hidden ? '▼ 收起 Backup 翻译配置' : '▶ 展开 Backup 翻译配置');
+        });
+
+        // 备用通道的 go-openai 专属字段。
+        $('#selectBackupOpenAiTranslator').on('change', function (_) {
+            var goOpenAi = this.value === 'GoOpenAi';
+            $('.selectBackupOpenAiTranslatorGoOpenAi').css('display', goOpenAi ? 'inherit' : 'none');
+        });
+
+        function refreshBackupToggle(page) {
+            var enabled = page.querySelector('#chkEnableBackupTranslation').checked;
+            $('#backupTranslationSection').css('display', enabled ? 'inherit' : 'none');
+        }
+
         $('.MetaTubeConfigurationPage').on('pageshow', function () {
             Dashboard.showLoadingMsg();
             var page = this;
@@ -440,6 +515,17 @@
                 $('#selectOpenAiTranslator', page).val(config.OpenAiTranslator).change();
                 $('#txtOpenAiExtraParams', page).val(config.OpenAiExtraParams).change();
                 $('#txtOpenAiMaxCompletionTokens', page).val(config.OpenAiMaxCompletionTokens).change();
+                page.querySelector('#chkEnableBackupTranslation').checked = config.EnableBackupTranslation;
+                $('#txtBackupOpenAiApiKey', page).val(config.BackupOpenAiApiKey).change();
+                $('#txtBackupOpenAiApiUrl', page).val(config.BackupOpenAiApiUrl).change();
+                $('#txtBackupOpenAiModel', page).val(config.BackupOpenAiModel).change();
+                $('#selectBackupOpenAiTranslator', page).val(config.BackupOpenAiTranslator).change();
+                $('#txtBackupOpenAiExtraParams', page).val(config.BackupOpenAiExtraParams).change();
+                $('#txtBackupOpenAiMaxCompletionTokens', page).val(config.BackupOpenAiMaxCompletionTokens).change();
+                // 备用翻译配置默认收起，只有用户主动展开才可见。
+                $('#backupTranslationFields').css('display', 'none');
+                $('#btnBackupTranslationToggleLabel').text('▶ 展开 Backup 翻译配置');
+                refreshBackupToggle(page);
                 $('#txtMaxChunkSize', page).val(config.MaxChunkSize).change();
                 $('#txtMaxTranslationConcurrency', page).val(config.MaxTranslationConcurrency).change();
                 $('#txtRequestTimeoutSeconds', page).val(config.RequestTimeoutSeconds).change();
@@ -491,6 +577,13 @@
                 config.OpenAiTranslator = $('#selectOpenAiTranslator', form).val();
                 config.OpenAiExtraParams = $('#txtOpenAiExtraParams', form).val();
                 config.OpenAiMaxCompletionTokens = parseInt($('#txtOpenAiMaxCompletionTokens', form).val(), 10) || 0;
+                config.EnableBackupTranslation = $('#chkEnableBackupTranslation', form).prop('checked');
+                config.BackupOpenAiApiKey = $('#txtBackupOpenAiApiKey', form).val();
+                config.BackupOpenAiApiUrl = $('#txtBackupOpenAiApiUrl', form).val();
+                config.BackupOpenAiModel = $('#txtBackupOpenAiModel', form).val();
+                config.BackupOpenAiTranslator = $('#selectBackupOpenAiTranslator', form).val();
+                config.BackupOpenAiExtraParams = $('#txtBackupOpenAiExtraParams', form).val();
+                config.BackupOpenAiMaxCompletionTokens = parseInt($('#txtBackupOpenAiMaxCompletionTokens', form).val(), 10) || 0;
                 config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
                 config.MaxTranslationConcurrency = $('#txtMaxTranslationConcurrency', form).val();
                 config.RequestTimeoutSeconds = $('#txtRequestTimeoutSeconds', form).val();

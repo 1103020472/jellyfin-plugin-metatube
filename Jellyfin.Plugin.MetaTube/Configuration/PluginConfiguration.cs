@@ -227,6 +227,57 @@ public class PluginConfiguration : BasePluginConfiguration
 #endif
     public int OpenAiMaxCompletionTokens { get; set; } = 4096;
 
+    /// <summary>
+    /// 备用翻译开关。部分中转站偶尔对某条文本返回
+    /// 「Sorry, I can't respond to this question」之类的拒答文案而不给译文；
+    /// 打开后，检测到该文案的那一次请求会改用下面的备用 OpenAI 参数重试（请求粒度切换，
+    /// 对上层调用者无感）。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Enable backup translation")]
+    [Description(
+        "When the primary translation returns a refusal placeholder (e.g. \"Sorry, I can't respond to this question\"), retry that single request with the backup OpenAI settings below.")]
+#endif
+    public bool EnableBackupTranslation { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Backup api key")]
+#endif
+    public string BackupOpenAiApiKey { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Backup api url")]
+    [Description("Custom OpenAI-compatible api url. (optional)")]
+#endif
+    public string BackupOpenAiApiUrl { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Backup model")]
+    [Description("Custom OpenAI-compatible api model. (optional)")]
+#endif
+    public string BackupOpenAiModel { get; set; } = string.Empty;
+
+    // 备用通道使用的 OpenAI 客户端实现，含义与主通道 OpenAiTranslator 相同。
+#if __EMBY__
+    [DisplayName("Backup translator")]
+    [Description(
+        "openai-translator (default) or go-openai. Only go-openai honors the backup extra params and max completion tokens below.")]
+#endif
+    public OpenAiTranslator BackupOpenAiTranslator { get; set; }
+
+#if __EMBY__
+    [DisplayName("Backup extra params (JSON)")]
+    [Description("Extra JSON fields merged into the chat completion request body (go-openai only).")]
+#endif
+    public string BackupOpenAiExtraParams { get; set; } = string.Empty;
+
+    // 备用通道单次请求最多生成的 token 数（含思维链）。默认 4096，0 表示使用默认值；仅 go-openai 生效。
+#if __EMBY__
+    [DisplayName("Backup max completion tokens")]
+    [Description("Upper bound of generated tokens per request (including reasoning). Default 4096. go-openai only.")]
+#endif
+    public int BackupOpenAiMaxCompletionTokens { get; set; } = 4096;
+
     // 翻译时最大传输的文字个数，避免一次性传太多需要AI翻译很久
 #if __EMBY__
     [DisplayName("Translation MaxChunkSize")]

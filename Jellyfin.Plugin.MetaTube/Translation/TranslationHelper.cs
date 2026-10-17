@@ -227,10 +227,80 @@ public static class TranslationHelper
 
     #endregion
 
+    /// <summary>
+    /// 检测翻译结果里的「拒答占位文案」。部分中转站 / 网关在模型拒绝时会返回
+    /// 「Sorry, I can't respond to this question」这类固定文案而不是报错，
+    /// 这种结果不是真译文。匹配不区分大小写，按子串出现即算命中。
+    /// </summary>
+    private static readonly Regex RefusalPlaceholderRegex =
+        new(@"Sorry,?\s*I\s*(?:ca|can)'?t\s*respond\s*to\s*this\s*question", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool IsRefusalPlaceholder(string text) =>
+        !string.IsNullOrEmpty(text) && RefusalPlaceholderRegex.IsMatch(text);
+
     private static async Task<string> TranslateAsync(string q, string from, string to, string title, int chunkIndex,
         CancellationToken cancellationToken)
     {
-        int millisecondsDelay;
+        var nv = BuildTranslationParams(out var millisecondsDelay, out var engineName);
+        // 每次翻译前同步一次并发配置，实现"改配置即生效"。
+        ApplyConcurrencyLimit();
+        await Gate.WaitAsync(cancellationToken);
+
+        try
+        {
+            async Task<string> TranslateWithDelay(NameValueCollection parameters, string engine, int delay)
+            {
+                await Task.Delay(delay, cancellationToken);
+                var start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var translationInfo = await ApiClient
+                    .TranslateAsync(q, from, to, engine, parameters, cancellationToken)
+                    .ConfigureAwait(false);
+                LogInfo("Translating {0}#{1} end, cost:{2}ms, chars:{3}", title, chunkIndex,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, q?.Length ?? 0);
+                return translationInfo.TranslatedText;
+            }
+
+            var context = $"{title}#{chunkIndex}({q?.Length ?? 0}chars)";
+            var translated = await RetryAsync(() => TranslateWithDelay(nv, engineName, millisecondsDelay), 1, context,
+                cancellationToken);
+
+            // 主通道返回了拒答占位文案，且备用翻译已启用、备用参数可用：
+            // 换备用 OpenAI 参数重发**同一次请求**（请求粒度切换，对上层调用者无感）。
+            if (IsRefusalPlaceholder(translated) && TryBuildBackupParams(out var backupNv, out var backupEngine))
+            {
+                LogWarn("Translate refusal placeholder detected ({0}), switching to backup translation.", context);
+                try
+                {
+                    var backupTranslated = await RetryAsync(
+                        () => TranslateWithDelay(backupNv, backupEngine, 0), 1, context + " [backup]",
+                        cancellationToken);
+                    // 备用通道也可能给出拒答 / 空结果：都失败时保留主通道结果，避免把占位文案换成语义更差的失败。
+                    if (!IsRefusalPlaceholder(backupTranslated) && !string.IsNullOrWhiteSpace(backupTranslated))
+                        return backupTranslated;
+                    LogWarn("Backup translation also returned refusal/empty ({0}), keeping primary result.", context);
+                }
+                catch (Exception e)
+                {
+                    // 备用通道失败不应让整个翻译失败：回退到主通道结果。
+                    LogWarn("Backup translation failed ({0}): {1}", context, e.Message);
+                }
+            }
+
+            return translated;
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// 按当前配置拼装主翻译通道的请求参数与引擎名。
+    /// </summary>
+    private static NameValueCollection BuildTranslationParams(out int millisecondsDelay, out string engineName)
+    {
+        millisecondsDelay = 0;
+        engineName = Configuration.TranslationEngine.ToString();
         var nv = new NameValueCollection();
         switch (Configuration.TranslationEngine)
         {
@@ -279,31 +349,30 @@ public static class TranslationHelper
                 throw new ArgumentException($"Invalid translation engine: {Configuration.TranslationEngine}");
         }
 
-        // 每次翻译前同步一次并发配置，实现"改配置即生效"。
-        ApplyConcurrencyLimit();
-        await Gate.WaitAsync(cancellationToken);
+        return nv;
+    }
 
-        try
-        {
-            async Task<string> TranslateWithDelay()
-            {
-                await Task.Delay(millisecondsDelay, cancellationToken);
-                var start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                var translationInfo = await ApiClient
-                    .TranslateAsync(q, from, to, Configuration.TranslationEngine.ToString(), nv, cancellationToken)
-                    .ConfigureAwait(false);
-                LogInfo("Translating {0}#{1} end, cost:{2}ms, chars:{3}", title, chunkIndex,
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, q?.Length ?? 0);
-                return translationInfo.TranslatedText;
-            }
+    /// <summary>
+    /// 拼装备用翻译通道的请求参数。备用通道固定走 OpenAI 兼容接口；
+    /// 开关关闭或连 api key 都没配时返回 false，表示不可用。
+    /// </summary>
+    private static bool TryBuildBackupParams(out NameValueCollection nv, out string engineName)
+    {
+        nv = null;
+        engineName = nameof(TranslationEngine.OpenAi);
+        if (!Configuration.EnableBackupTranslation) return false;
+        if (string.IsNullOrWhiteSpace(Configuration.BackupOpenAiApiKey)) return false;
 
-            var context = $"{title}#{chunkIndex}({q?.Length ?? 0}chars)";
-            return await RetryAsync(TranslateWithDelay, 1, context, cancellationToken);
-        }
-        finally
+        nv = new NameValueCollection
         {
-            Gate.Release();
-        }
+            { "openai-api-key", Configuration.BackupOpenAiApiKey },
+            { "openai-api-url", Configuration.BackupOpenAiApiUrl },
+            { "openai-model", Configuration.BackupOpenAiModel },
+            { "openai-translator", Configuration.BackupOpenAiTranslator.ToSdkValue() },
+            { "openai-extra-params", Configuration.BackupOpenAiExtraParams },
+            { "openai-max-completion-tokens", Configuration.BackupOpenAiMaxCompletionTokens.ToString() }
+        };
+        return true;
     }
 
      public static async Task TranslateAsync(MovieInfo m, string to, CancellationToken cancellationToken)
