@@ -232,6 +232,26 @@
                                 <input id="txtOpenAiModel" is="emby-input" name="txtOpenAiModel" type="text"/>
                                 <div class="fieldDescription">Custom OpenAI-compatible api model. (optional)</div>
                             </div>
+                            <div class="selectContainer">
+                                <label class="selectLabel selectLabelText" for="selectOpenAiTranslator">OpenAI 翻译组件:</label>
+                                <select class="emby-select-withcolor emby-select" id="selectOpenAiTranslator" is="emby-select" name="selectOpenAiTranslator">
+                                    <option value="OpenAiTranslator">openai-translator（默认）</option>
+                                    <option value="GoOpenAi">go-openai（可配置思考度 / 最大 token）</option>
+                                </select>
+                                <div class="fieldDescription">翻译时使用的 OpenAI 客户端实现。默认 openai-translator（历史行为）；选 go-openai 后，下面的"额外参数"和"最大 token"才会生效。</div>
+                            </div>
+                            <div class="selectOpenAiTranslatorGoOpenAi" style="display: none;">
+                                <div class="inputContainer">
+                                    <label class="inputLabel inputLabelUnfocused" for="txtOpenAiExtraParams">OpenAI 额外参数 (JSON):</label>
+                                    <input id="txtOpenAiExtraParams" is="emby-input" name="txtOpenAiExtraParams" type="text"/>
+                                    <div class="fieldDescription">合并进请求体的额外 JSON 字段，仅 go-openai 生效。SiliconFlow 关闭思考：{"thinking_budget": 1}；智谱：{"thinking": {"type": "disabled"}}。</div>
+                                </div>
+                                <div class="inputContainer">
+                                    <label class="inputLabel inputLabelUnfocused" for="txtOpenAiMaxCompletionTokens">OpenAI 最大 token:</label>
+                                    <input id="txtOpenAiMaxCompletionTokens" is="emby-input" name="txtOpenAiMaxCompletionTokens" type="number" min="0"/>
+                                    <div class="fieldDescription">单次请求最多生成的 token 数（含思维链），默认 4096，仅 go-openai 生效。</div>
+                                </div>
+                            </div>
                             <div class="inputContainer">
                                 <label class="inputLabel inputLabelUnfocused" for="txtMaxChunkSize">OpenAI maxChunkSize:</label>
                                 <input id="txtMaxChunkSize" is="emby-input" name="txtMaxChunkSize" type="number"/>
@@ -380,6 +400,12 @@
             }
         });
 
+        // 只有 go-openai 才支持额外参数 / 最大 token，所以按所选组件显示或隐藏。
+        $('#selectOpenAiTranslator').on('change', function (_) {
+            var goOpenAi = this.value === 'GoOpenAi';
+            $('.selectOpenAiTranslatorGoOpenAi').css('display', goOpenAi ? 'inherit' : 'none');
+        });
+
         $('.MetaTubeConfigurationPage').on('pageshow', function () {
             Dashboard.showLoadingMsg();
             var page = this;
@@ -411,6 +437,9 @@
                 $('#txtOpenAiApiKey', page).val(config.OpenAiApiKey).change();
                 $('#txtOpenAiApiUrl', page).val(config.OpenAiApiUrl).change();
                 $('#txtOpenAiModel', page).val(config.OpenAiModel).change();
+                $('#selectOpenAiTranslator', page).val(config.OpenAiTranslator).change();
+                $('#txtOpenAiExtraParams', page).val(config.OpenAiExtraParams).change();
+                $('#txtOpenAiMaxCompletionTokens', page).val(config.OpenAiMaxCompletionTokens).change();
                 $('#txtMaxChunkSize', page).val(config.MaxChunkSize).change();
                 $('#txtMaxTranslationConcurrency', page).val(config.MaxTranslationConcurrency).change();
                 $('#txtRequestTimeoutSeconds', page).val(config.RequestTimeoutSeconds).change();
@@ -459,6 +488,9 @@
                 config.OpenAiApiKey = $('#txtOpenAiApiKey', form).val();
                 config.OpenAiApiUrl = $('#txtOpenAiApiUrl', form).val();
                 config.OpenAiModel = $('#txtOpenAiModel', form).val();
+                config.OpenAiTranslator = $('#selectOpenAiTranslator', form).val();
+                config.OpenAiExtraParams = $('#txtOpenAiExtraParams', form).val();
+                config.OpenAiMaxCompletionTokens = parseInt($('#txtOpenAiMaxCompletionTokens', form).val(), 10) || 0;
                 config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
                 config.MaxTranslationConcurrency = $('#txtMaxTranslationConcurrency', form).val();
                 config.RequestTimeoutSeconds = $('#txtRequestTimeoutSeconds', form).val();

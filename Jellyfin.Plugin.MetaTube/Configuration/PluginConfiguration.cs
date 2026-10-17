@@ -202,17 +202,27 @@ public class PluginConfiguration : BasePluginConfiguration
 #endif
     public string OpenAiModel { get; set; } = string.Empty;
 
+    // 翻译时使用的 OpenAI 客户端实现。默认（第一个枚举值）是 openai-translator，
+    // 保持历史行为；只有 go-openai 才会应用下面的额外参数与最大 token 配置。
+#if __EMBY__
+    [DisplayName("OpenAI translator")]
+    [Description(
+        "openai-translator (default) or go-openai. Only go-openai honors the extra params and max completion tokens below.")]
+    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public OpenAiTranslator OpenAiTranslator { get; set; }
+
 #if __EMBY__
     [DisplayName("OpenAI extra params (JSON)")]
-    [Description("Extra JSON fields merged into the chat completion request body. To cut cost/latency on SiliconFlow reasoning models use {\"thinking_budget\": 1} (verified: reasoning tokens 1154 -> 2, 13s -> 1.3s). Other gateways differ, e.g. Zhipu {\"thinking\": {\"type\": \"disabled\"}}, vLLM {\"chat_template_kwargs\": {\"enable_thinking\": false}}.")]
+    [Description("Extra JSON fields merged into the chat completion request body (go-openai only). To cut cost/latency on SiliconFlow reasoning models use {\"thinking_budget\": 1} (verified: reasoning tokens 1154 -> 2, 13s -> 1.3s). Other gateways differ, e.g. Zhipu {\"thinking\": {\"type\": \"disabled\"}}, vLLM {\"chat_template_kwargs\": {\"enable_thinking\": false}}.")]
     [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
 #endif
     public string OpenAiExtraParams { get; set; } = string.Empty;
 
-    // 单次请求最多生成的 token 数（含思维链）。默认 4096，0 表示使用默认值。
+    // 单次请求最多生成的 token 数（含思维链）。默认 4096，0 表示使用默认值；仅 go-openai 生效。
 #if __EMBY__
     [DisplayName("OpenAI max completion tokens")]
-    [Description("Upper bound of generated tokens per request (including reasoning). Default 4096.")]
+    [Description("Upper bound of generated tokens per request (including reasoning). Default 4096. go-openai only.")]
     [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
 #endif
     public int OpenAiMaxCompletionTokens { get; set; } = 4096;

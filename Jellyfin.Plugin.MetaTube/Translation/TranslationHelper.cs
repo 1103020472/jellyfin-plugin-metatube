@@ -269,6 +269,8 @@ public static class TranslationHelper
                     { "openai-api-key", Configuration.OpenAiApiKey },
                     { "openai-api-url", Configuration.OpenAiApiUrl },
                     { "openai-model", Configuration.OpenAiModel },
+                    // 由 SDK 根据该值选择 openai-translator / go-openai 实现。
+                    { "openai-translator", Configuration.OpenAiTranslator.ToSdkValue() },
                     { "openai-extra-params", Configuration.OpenAiExtraParams },
                     { "openai-max-completion-tokens", Configuration.OpenAiMaxCompletionTokens.ToString() }
                 });
