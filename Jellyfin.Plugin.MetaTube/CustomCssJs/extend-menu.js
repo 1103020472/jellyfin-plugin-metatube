@@ -108,6 +108,21 @@
         });
     }
 
+    // =========================
+    // 条目动作菜单正向识别（白名单）
+    //   Emby 所有弹层菜单（条目动作菜单 / 字幕 / 音轨 / 版本 / 系统用户菜单…）
+    //   都由同一个 actionsheet 组件渲染。源码里只有调用方传了 options.item
+    //   （条目动作菜单，itemcontextmenu.js）才会渲染条目预览区
+    //   .actionsheetItemPreview；字幕/音轨/版本/系统菜单都不传，没有该节点。
+    //   之前用黑名单逐个识别，每遇到一种新菜单（如字幕菜单）就漏一次；
+    //   改为白名单：没有预览区的一律不注入。
+    // =========================
+    function isItemActionMenu(container) {
+        if (!container) return false;
+        const dlg = container.closest('.actionSheet');
+        return !!(dlg && dlg.querySelector('.actionsheetItemPreview'));
+    }
+
     // 标题预览节点（列表页卡片 / 详情页菜单都会有），它带的是条目信息
     function getPreviewText() {
         const el = document.querySelector('.actionsheetPreviewTextItem');
@@ -436,8 +451,10 @@
         const container = document.querySelector('.actionsheetScrollSlider');
         if (!container) return;
 
-        // 系统菜单（含「管理 Emby Server」入口）一律不注入，并把可能残留的自定义按钮清掉
-        if (isSystemMenu(container) || isMediaSourceMenu(container)) {
+        // 白名单：只有条目动作菜单（带条目预览区）才注入，
+        // 其余（字幕/音轨/版本/系统菜单等）一律清理残留后跳过
+        if (!isItemActionMenu(container)
+            || isSystemMenu(container) || isMediaSourceMenu(container)) {
             document.querySelectorAll('.actionsheetScrollSlider').forEach(removeInjectedButtons);
             return;
         }
@@ -460,7 +477,8 @@
         if (!currentContainer) return;
 
         // 请求期间用户可能切换到系统菜单 / 关闭菜单，这里再确认一次
-        if (isSystemMenu(currentContainer) || isMediaSourceMenu(currentContainer)) {
+        if (!isItemActionMenu(currentContainer)
+            || isSystemMenu(currentContainer) || isMediaSourceMenu(currentContainer)) {
             document.querySelectorAll('.actionsheetScrollSlider').forEach(removeInjectedButtons);
             return;
         }
