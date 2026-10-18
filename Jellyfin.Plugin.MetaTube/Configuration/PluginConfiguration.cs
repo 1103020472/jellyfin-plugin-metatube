@@ -227,6 +227,20 @@ public class PluginConfiguration : BasePluginConfiguration
 #endif
     public int OpenAiMaxCompletionTokens { get; set; } = 4096;
 
+#if __EMBY__
+    [DisplayName("JavDB cookie")]
+    [Description(
+        "JavDB 会话 cookie（如 _jdb_session=...），用于访问需要登录的条目（如 FC2 素人番号）。" +
+        "从浏览器登录 JavDB 后，在开发者工具(F12) → Network 里复制请求的 Cookie 头整个填入即可。留空则不携带。")]
+#endif
+    public string JavdbCookie { get; set; } = string.Empty;
+
+    /// <summary>解析后的 JavDB cookie；空白返回空字符串。</summary>
+    public string GetJavdbCookie()
+    {
+        return JavdbCookie?.Trim() ?? string.Empty;
+    }
+
     /// <summary>
     /// 备用翻译开关。部分中转站偶尔对某条文本返回
     /// 「Sorry, I can't respond to this question」之类的拒答文案而不给译文；

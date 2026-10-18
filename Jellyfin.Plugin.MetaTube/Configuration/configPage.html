@@ -128,6 +128,16 @@
                 </div>
 
                 <div class="verticalSection">
+                    <h2 class="sectionTitle">JavDB</h2>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="txtJavdbCookie">JavDB cookie:</label>
+                        <textarea class="emby-input" id="txtJavdbCookie" is="emby-input" name="txtJavdbCookie" rows="3"></textarea>
+                        <div class="fieldDescription">JavDB 会话 cookie，用于访问需要登录的条目（FC2 等素人番号）。浏览器登录 JavDB 后按 F12 → Network，任选一个 javdb.com 请求，复制 Request Headers 里的整个 Cookie 值粘贴到这里（至少要包含 _jdb_session=...）。保存后自动推送到 MetaTube 服务端，无需重启。cookie 失效时刮削日志会提示「JavDB cookie 已失效」，届时重新复制一份即可。</div>
+                    </div>
+                </div>
+
+                <div class="verticalSection">
                     <h2 class="sectionTitle">Template</h2>
 
                     <div class="checkboxContainer checkboxContainer-withDescription">
@@ -503,6 +513,7 @@
                 $('#txtDefaultImageQuality', page).val(config.DefaultImageQuality).change();
                 page.querySelector('#chkEnableMovieProviderFilter').checked = config.EnableMovieProviderFilter;
                 $('#txtRawMovieProviderFilter', page).val(config.RawMovieProviderFilter).change();
+                $('#txtJavdbCookie', page).val(config.JavdbCookie).change();
                 page.querySelector('#chkEnableTemplate').checked = config.EnableTemplate;
                 $('#txtNameTemplate', page).val(config.NameTemplate).change();
                 $('#txtTaglineTemplate', page).val(config.TaglineTemplate).change();
@@ -566,6 +577,7 @@
                 config.DefaultImageQuality = $('#txtDefaultImageQuality', form).val();
                 config.EnableMovieProviderFilter = $('#chkEnableMovieProviderFilter', form).prop('checked');
                 config.RawMovieProviderFilter = $('#txtRawMovieProviderFilter', form).val();
+                config.JavdbCookie = $('#txtJavdbCookie', form).val();
                 config.EnableTemplate = $('#chkEnableTemplate', form).prop('checked');
                 config.NameTemplate = $('#txtNameTemplate', form).val();
                 config.TaglineTemplate = $('#txtTaglineTemplate', form).val();

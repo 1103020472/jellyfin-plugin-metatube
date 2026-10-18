@@ -6,6 +6,8 @@ using Jellyfin.Plugin.MetaTube.Metadata;
 #if __EMBY__
 using MediaBrowser.Common.Net;
 using MediaBrowser.Model.Logging;
+#else
+using Microsoft.Extensions.Logging;
 #endif
 
 namespace Jellyfin.Plugin.MetaTube;
@@ -17,6 +19,7 @@ public static class ApiClient
     private const string ActorSearchApi = "/v1/actors/search";
     private const string MovieSearchApi = "/v1/movies/search";
     private const string ReviewApi = "/v1/reviews";
+    private const string ProviderConfigApi = "/v1/providers/config";
     private const string PrimaryImageApi = "/v1/images/primary";
     private const string ThumbImageApi = "/v1/images/thumb";
     private const string BackdropImageApi = "/v1/images/backdrop";
@@ -87,6 +90,16 @@ public static class ApiClient
             { "to", to },
             { "engine", engine },
             nv ?? new NameValueCollection()
+        });
+    }
+
+    private static string ComposeProviderConfigApiUrl(string provider, string key, string value)
+    {
+        return ComposeUrl(ProviderConfigApi, new NameValueCollection
+        {
+            { "provider", provider },
+            { "key", key },
+            { "value", value ?? string.Empty }
         });
     }
 
@@ -240,10 +253,100 @@ public static class ApiClient
         return await GetDataAsync<TranslationInfo>(apiUrl, false, cancellationToken);
     }
 
+    #region JavDB cookie 同步
+
+    private const string JavdbProviderName = "JavDB";
+    private const string JavdbCookieConfigKey = "cookie";
+
+    /// <summary>上一次推送的 cookie，用于避免重复推送。</summary>
+    private static string _lastPushedJavdbCookie;
+
+    /// <summary>
+    /// 把插件配置里的 JavDB cookie 推送到 MetaTube 服务端（运行时生效，无需重启）。
+    ///
+    /// 推送条件：cookie 非空且与上次推送值不同；失败仅记 Warn，不影响元数据刮削主流程。
+    /// 在元数据/搜索请求前调用，所以服务端重启后第一次请求就会重新推送。
+    /// </summary>
+    public static void PushJavdbCookieIfNeeded()
+    {
+        var cookie = Plugin.Instance.Configuration.GetJavdbCookie();
+        if (cookie.Length == 0)
+        {
+            _lastPushedJavdbCookie = string.Empty;
+            return;
+        }
+        if (string.Equals(cookie, _lastPushedJavdbCookie, StringComparison.Ordinal))
+            return; // unchanged, nothing to do.
+
+        var url = ComposeProviderConfigApiUrl(JavdbProviderName, JavdbCookieConfigKey, cookie);
+        var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Add("User-Agent", DefaultUserAgent);
+        if (!string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.Token))
+            request.Headers.Authorization =
+                new AuthenticationHeaderValue("Bearer", Plugin.Instance.Configuration.Token);
+
+        // 同步等待：cookie 没推送成功，后续的 JavDB 请求必然还是未登录，推了才有意义。
+        // 超时给短一些（5 秒），别拖慢刮削；失败也只降级为 Warn。
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var response = HttpClient.SendAsync(request, cts.Token).GetAwaiter().GetResult();
+            if (response.IsSuccessStatusCode)
+            {
+                LogInfo("Pushed JavDB cookie to MetaTube server.");
+                _lastPushedJavdbCookie = cookie;
+            }
+            else
+            {
+                LogWarn("Push JavDB cookie failed: HTTP {0}. JavDB 登录内容（FC2 等）将不可用。",
+                    (int)response.StatusCode);
+            }
+        }
+        catch (Exception e)
+        {
+            LogWarn("Push JavDB cookie error: {0}", e.Message);
+        }
+    }
+
+    private static readonly ILogger Logger = CreateLogger();
+
+    /// <summary>
+    /// ApiClient 是静态类，拿不到构造注入的 logger。
+    /// Emby：直接复用插件实例的 logger；Jellyfin：静态上下文拿不到宿主服务，
+    /// cookie 推送日志对 Jellyfin 用户不是关键路径，留空即可。
+    /// </summary>
+    private static ILogger CreateLogger()
+    {
+#if __EMBY__
+        return Plugin.Instance.logger;
+#else
+        return null;
+#endif
+    }
+
+    private static void LogInfo(string format, params object[] args)
+    {
+#if __EMBY__
+        Logger?.Info(format, args);
+#endif
+    }
+
+    private static void LogWarn(string format, params object[] args)
+    {
+#if __EMBY__
+        Logger?.Warn(format, args);
+#endif
+    }
+
+    #endregion
+
     private static async Task<T> GetDataAsync<T>(string url, bool requireAuth,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+
+        // 每次数据请求前先确保 JavDB cookie 已同步到服务端（有变化才真正发请求）。
+        PushJavdbCookieIfNeeded();
 
         var request = new HttpRequestMessage(HttpMethod.Get, url);
 

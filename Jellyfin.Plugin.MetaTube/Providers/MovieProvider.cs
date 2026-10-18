@@ -67,7 +67,23 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         var forceRefetch = pid.Update == true || Configuration.EnableForceRefetch;
         if (forceRefetch) Logger.Info("Force refetch movie from source site: {0}", pid.ToString());
 
-        var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, !forceRefetch, cancellationToken);
+        Metadata.MovieInfo m;
+        try
+        {
+            m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, !forceRefetch, cancellationToken);
+        }
+        catch (Exception e) when (ApiErrorClassifier.IsJavdbLoginRequired(e))
+        {
+            // JavDB 未登录/cookie 失效是配置问题，不是故障：给出友好提示并放弃本条元数据，
+            // 否则原始异常会以 Error 级别刷屏，用户看不出是 cookie 的问题。
+            if (ApiErrorClassifier.IsJavdbCookieExpired(e))
+                Logger.Warn("JavDB cookie 已失效，条目「{0}」抓取跳过。请到浏览器重新复制 JavDB 的 Cookie（F12 → Network），" +
+                            "在插件设置里更新 JavDB cookie 后重试。", info.Name);
+            else
+                Logger.Warn("JavDB 未登录，条目「{0}」（如 FC2 等素人番号）需要 JavDB cookie 才能抓取。" +
+                            "请在插件设置里填写 JavDB cookie 后重试。", info.Name);
+            return new MetadataResult<Movie> { HasMetadata = false };
+        }
         if (!string.IsNullOrWhiteSpace(m.Number))
         {
             m.Number = m.Number.ToUpperInvariant();
@@ -373,8 +389,22 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         {
             // Exact search.
             Logger.Info("Search for movie: {0}", pid.ToString());
-            searchResults.Add(await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id,
-                pid.Update != true, cancellationToken));
+            try
+            {
+                searchResults.Add(await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id,
+                    pid.Update != true, cancellationToken));
+            }
+            catch (Exception e) when (ApiErrorClassifier.IsJavdbLoginRequired(e))
+            {
+                // 同 GetMetadata：JavDB 未登录/cookie 失效按友好 Warn 处理，返回空结果即可。
+                if (ApiErrorClassifier.IsJavdbCookieExpired(e))
+                    Logger.Warn("JavDB cookie 已失效，条目「{0}」搜索跳过。请在插件设置里更新 JavDB cookie 后重试。",
+                        info.Name);
+                else
+                    Logger.Warn("JavDB 未登录，条目「{0}」需要 JavDB cookie 才能搜索。请在插件设置里填写 JavDB cookie 后重试。",
+                        info.Name);
+                return Enumerable.Empty<RemoteSearchResult>();
+            }
         }
 
         if (Configuration.EnableMovieProviderFilter)

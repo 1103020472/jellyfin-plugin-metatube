@@ -26,6 +26,35 @@ public static class ApiErrorClassifier
 
     private const string PlainNotFound = "Not Found";
 
+    /// <summary>服务端表示「JavDB 需要登录/cookie 失效」的固定文案（401）。</summary>
+    private const string JavdbLoginRequired = "JavDB 该条目需要登录后才能访问";
+
+    /// <summary>服务端表示「JavDB cookie 已失效」的固定文案（401）。</summary>
+    private const string JavdbCookieExpired = "JavDB cookie 已失效";
+
+    /// <summary>
+    /// 是否属于「JavDB 未登录 / cookie 缺失或已失效」。
+    ///
+    /// 服务端 javdb provider 在条目需要登录（FC2 等素人番号）时返回 401，
+    /// 携带的 cookie 过期时同样返回 401 且文案里带「cookie 已失效」。
+    /// 这不是故障，是配置问题：按 Warn 记一条友好日志并提示用户填/换 cookie。
+    /// </summary>
+    public static bool IsJavdbLoginRequired(Exception e)
+    {
+        var message = e?.Message;
+        if (string.IsNullOrWhiteSpace(message))
+            return false;
+
+        return message.Contains(JavdbLoginRequired, StringComparison.OrdinalIgnoreCase)
+               || message.Contains(JavdbCookieExpired, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>该异常是否提示「cookie 已失效」（需要用户重新复制 cookie）。</summary>
+    public static bool IsJavdbCookieExpired(Exception e)
+    {
+        return e?.Message?.Contains(JavdbCookieExpired, StringComparison.OrdinalIgnoreCase) == true;
+    }
+
     /// <summary>
     /// 是否属于「目标资源不存在」——即业务上的空结果，而非请求失败。
     ///
