@@ -278,6 +278,37 @@ public class PluginConfiguration : BasePluginConfiguration
 #endif
     public int BackupOpenAiMaxCompletionTokens { get; set; } = 4096;
 
+    /// <summary>
+    /// 触发备用翻译的拒答文案列表（原始多行文本，每行一条，忽略空行）。
+    /// 主通道返回的译文里出现**任意一条**（忽略大小写的子串匹配）即视为拒答、转备用通道。
+    /// 留空时使用内置默认文案 <see cref="DefaultBackupRefusalPatterns"/>。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Backup refusal patterns")]
+    [Description(
+        "One refusal placeholder per line. If the translated text contains any of these substrings (case-insensitive), that request is retried via the backup channel. Leave blank to use the built-in default (\"Sorry, I can't respond to this question\").")]
+    [EditMultiline(5)]
+#endif
+    public string BackupRefusalPatterns { get; set; } = string.Empty;
+
+    /// <summary>解析后的拒答文案列表；空列表表示用内置默认。</summary>
+    public List<string> GetBackupRefusalPatterns()
+    {
+        var list = (BackupRefusalPatterns ?? string.Empty)
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return list;
+    }
+
+    /// <summary>未配置时的内置默认拒答文案。</summary>
+    public static readonly string[] DefaultBackupRefusalPatterns =
+    {
+        "Sorry, I can't respond to this question"
+    };
+
     // 翻译时最大传输的文字个数，避免一次性传太多需要AI翻译很久
 #if __EMBY__
     [DisplayName("Translation MaxChunkSize")]

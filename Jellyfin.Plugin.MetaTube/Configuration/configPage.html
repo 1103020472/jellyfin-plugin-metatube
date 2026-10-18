@@ -317,6 +317,11 @@
                                             <div class="fieldDescription">单次请求最多生成的 token 数（含思维链），默认 4096，仅 go-openai 生效。</div>
                                         </div>
                                     </div>
+                                    <div class="inputContainer">
+                                        <label class="inputLabel inputLabelUnfocused" for="txtBackupRefusalPatterns">触发备用翻译的拒答文案:</label>
+                                        <textarea id="txtBackupRefusalPatterns" is="emby-textarea" name="txtBackupRefusalPatterns" class="emby-textarea" rows="5" style="width: 100%;"></textarea>
+                                        <div class="fieldDescription">每行一条，译文包含任意一条（忽略大小写）即转备用通道。留空使用默认：Sorry, I can't respond to this question</div>
+                                    </div>
                                 </div>
                             </div>
                             <div class="checkboxContainer checkboxContainer-withDescription">
@@ -522,6 +527,7 @@
                 $('#selectBackupOpenAiTranslator', page).val(config.BackupOpenAiTranslator).change();
                 $('#txtBackupOpenAiExtraParams', page).val(config.BackupOpenAiExtraParams).change();
                 $('#txtBackupOpenAiMaxCompletionTokens', page).val(config.BackupOpenAiMaxCompletionTokens).change();
+                $('#txtBackupRefusalPatterns', page).val(config.BackupRefusalPatterns).change();
                 // 备用翻译配置默认收起，只有用户主动展开才可见。
                 $('#backupTranslationFields').css('display', 'none');
                 $('#btnBackupTranslationToggleLabel').text('▶ 展开 Backup 翻译配置');
@@ -584,6 +590,7 @@
                 config.BackupOpenAiTranslator = $('#selectBackupOpenAiTranslator', form).val();
                 config.BackupOpenAiExtraParams = $('#txtBackupOpenAiExtraParams', form).val();
                 config.BackupOpenAiMaxCompletionTokens = parseInt($('#txtBackupOpenAiMaxCompletionTokens', form).val(), 10) || 0;
+                config.BackupRefusalPatterns = $('#txtBackupRefusalPatterns', form).val();
                 config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
                 config.MaxTranslationConcurrency = $('#txtMaxTranslationConcurrency', form).val();
                 config.RequestTimeoutSeconds = $('#txtRequestTimeoutSeconds', form).val();

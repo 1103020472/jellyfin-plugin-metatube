@@ -228,15 +228,29 @@ public static class TranslationHelper
     #endregion
 
     /// <summary>
-    /// 检测翻译结果里的「拒答占位文案」。部分中转站 / 网关在模型拒绝时会返回
-    /// 「Sorry, I can't respond to this question」这类固定文案而不是报错，
-    /// 这种结果不是真译文。匹配不区分大小写，按子串出现即算命中。
+    /// 检测翻译结果里的「拒答占位文案」，判定是否需要转备用通道。
+    ///
+    /// 匹配文案由配置项 <see cref="PluginConfiguration.BackupRefusalPatterns"/> 提供：
+    /// 每行一条，译文里出现**任意一条**（忽略大小写的子串匹配）即视为拒答。
+    /// 未配置时使用内置默认（PluginConfiguration.DefaultBackupRefusalPatterns）。
+    ///
+    /// 实现说明：文案条数很少（个位数）且都是短串，直接逐条 IndexOf 即可，
+    /// 不值得为它编译正则或建 Aho–Corasick。
     /// </summary>
-    private static readonly Regex RefusalPlaceholderRegex =
-        new(@"Sorry,?\s*I\s*(?:ca|can)'?t\s*respond\s*to\s*this\s*question", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static bool IsRefusalPlaceholder(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
 
-    private static bool IsRefusalPlaceholder(string text) =>
-        !string.IsNullOrEmpty(text) && RefusalPlaceholderRegex.IsMatch(text);
+        var patterns = Configuration.GetBackupRefusalPatterns();
+        if (patterns.Count == 0)
+            patterns = PluginConfiguration.DefaultBackupRefusalPatterns.ToList();
+
+        foreach (var pattern in patterns)
+            if (text.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+
+        return false;
+    }
 
     private static async Task<string> TranslateAsync(string q, string from, string to, string title, int chunkIndex,
         CancellationToken cancellationToken)
