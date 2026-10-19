@@ -455,6 +455,70 @@ public class PluginConfiguration : BasePluginConfiguration
 #endif
     public bool EnableGenreSubstitution { get; set; } = false;
 
+    // ===== Merge Multi Versions（多版本合并，自 StrmAssistant 迁移）=====
+
+    /// <summary>
+    /// 多版本合并总开关。打开后：媒体库扫描完成时自动合并同一番号的多个版本
+    /// （按 MetaTube ProviderId 分组），也可在计划任务里手动运行。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Merge multi versions")]
+    [Description("Auto merge multiple versions of the same video (same MetaTube id) after library scans. Also available as a scheduled task.")]
+    [Required]
+#endif
+    public bool MergeMultiVersion { get; set; } = false;
+
+    /// <summary>合并范围枚举：仅当前扫描的库，或全局所有电影库。</summary>
+    public enum MergeMoviesScopeOption
+    {
+        LibraryScope,
+        GlobalScope
+    }
+
+#if __EMBY__
+    [DisplayName("Merge movies scope")]
+    [Description("LibraryScope merges versions within the library being scanned; GlobalScope merges across all movie libraries.")]
+    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
+#endif
+    public MergeMoviesScopeOption MergeMoviesPreference { get; set; } = MergeMoviesScopeOption.LibraryScope;
+
+    /// <summary>
+    /// 参与合并的媒体库名单（逗号分隔的库名）。留空 = 所有电影库都参与（默认全选）。
+    /// 只有名单内的库才会被合并任务扫描；名单外即使有同番号多版本也不合并。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Merge libraries")]
+    [Description("Comma-separated movie library names allowed to merge. Leave blank to include all libraries (default).")]
+    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
+#endif
+    public string MergeMoviesLibraryList { get; set; } = string.Empty;
+
+    /// <summary>解析后的库名单；空集合表示不限制（全部库参与）。</summary>
+    public List<string> GetMergeMoviesLibraries()
+    {
+        return (MergeMoviesLibraryList ?? string.Empty)
+            .Split(',')
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 多 CD part 合并开关，默认关闭。
+    ///
+    /// * 关闭（默认）：待合并的番号组里只要任意一个条目存在额外的 CD part（如 -cd1/-cd2 拆分文件），
+    ///   整组都不合并，避免把 part 结构打乱；
+    /// * 打开：允许合并带 CD part 的条目，但要求组内每个番号的 part 数量完全一致
+    ///   （每个条目按 1 + 额外 part 数计），不一致则该组跳过。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Merge with CD parts")]
+    [Description("Off (default): skip groups where any item has additional CD parts. On: merge items with CD parts, but only when every item has the same part count.")]
+    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
+#endif
+    public bool MergeMultiVersionWithParts { get; set; } = false;
+
 #if __EMBY__
     [DisplayName("Title substitution table")]
     [Description(

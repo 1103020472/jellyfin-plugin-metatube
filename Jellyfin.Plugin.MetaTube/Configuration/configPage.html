@@ -6,7 +6,7 @@
 </head>
 
 <body>
-<div class="page type-interior pluginConfigurationPage MetaTubeConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox,emby-linkbutton" data-role="page">
+<div class="page type-interior pluginConfigurationPage MetaTubeConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox,emby-linkbutton,emby-tabs" data-role="page">
     <div data-role="content">
         <div class="content-primary">
 
@@ -18,6 +18,16 @@
 
             <form class="MetaTubeConfigurationForm">
 
+                <div is="emby-tabs" class="metatube-config-tabs">
+                    <button type="button" is="emby-button" class="emby-tab-button" data-index="0"><span>General</span></button>
+                    <button type="button" is="emby-button" class="emby-tab-button" data-index="1"><span>Badge / Image</span></button>
+                    <button type="button" is="emby-button" class="emby-tab-button" data-index="2"><span>Provider / Template</span></button>
+                    <button type="button" is="emby-button" class="emby-tab-button" data-index="3"><span>Translation</span></button>
+                    <button type="button" is="emby-button" class="emby-tab-button" data-index="4"><span>Substitution</span></button>
+                    <button type="button" is="emby-button" class="emby-tab-button" data-index="5"><span>Merge / Tools</span></button>
+                </div>
+
+                <div class="metatube-tab-page" data-index="0">
                 <div class="verticalSection">
                     <h2>General</h2>
 
@@ -74,7 +84,9 @@
                         <div class="fieldDescription checkboxFieldDescription">Search and replace with real actor names from AVBASE.</div>
                     </div>
                 </div>
+                </div>
 
+                <div class="metatube-tab-page" data-index="1" style="display: none;">
                 <div class="verticalSection">
                     <h2 class="sectionTitle">Badge</h2>
 
@@ -108,7 +120,9 @@
                         <div class="fieldDescription">Default compression quality for JPEG images, set between 0 and 100. (default: 90)</div>
                     </div>
                 </div>
+                </div>
 
+                <div class="metatube-tab-page" data-index="2" style="display: none;">
                 <div class="verticalSection">
                     <h2 class="sectionTitle">Provider</h2>
 
@@ -139,7 +153,6 @@
 
                 <div class="verticalSection">
                     <h2 class="sectionTitle">Template</h2>
-
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label class="emby-checkbox-label">
                             <input id="chkEnableTemplate" is="emby-checkbox" name="chkEnableTemplate" type="checkbox"/>
@@ -160,7 +173,9 @@
                         <div class="fieldDescription"></div>
                     </div>
                 </div>
+                </div>
 
+                <div class="metatube-tab-page" data-index="3" style="display: none;">
                 <div class="verticalSection">
                     <h2 class="sectionTitle">Translation</h2>
 
@@ -365,7 +380,9 @@
                         </div>
                     </div>
                 </div>
+                </div>
 
+                <div class="metatube-tab-page" data-index="4" style="display: none;">
                 <div class="verticalSection">
                     <h2 class="sectionTitle">Substitution</h2>
 
@@ -410,6 +427,45 @@
                         <textarea class="emby-input" id="txtGenreRawSubstitutionTable" is="emby-input" name="txtGenreRawSubstitutionTable" rows="5"></textarea>
                         <div class="fieldDescription">One record per line, separated by equal signs. Leave the target genre blank to delete the source genre.</div>
                     </div>
+                </div>
+                </div>
+
+                <div class="metatube-tab-page" data-index="5" style="display: none;">
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">Merge Multi Versions</h2>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="chkMergeMultiVersion" is="emby-checkbox" name="chkMergeMultiVersion" type="checkbox"/>
+                            <span>Merge multi versions</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">Auto merge multiple versions of the same video (same MetaTube id) after library scans. Also available as a scheduled task.</div>
+                    </div>
+
+                    <div class="mergeMultiVersionEnabled" style="display: none;">
+                        <div class="selectContainer">
+                            <label class="selectLabel selectLabelText" for="selectMergeMoviesPreference">Merge movies scope:</label>
+                            <select class="emby-select-withcolor emby-select" id="selectMergeMoviesPreference" is="emby-select" name="selectMergeMoviesPreference">
+                                <option value="LibraryScope">LibraryScope（仅当前扫描的库）</option>
+                                <option value="GlobalScope">GlobalScope（所有电影库全局合并）</option>
+                            </select>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabel-float inputLabelUnfocused" for="txtMergeMoviesLibraryList">Merge libraries:</label>
+                            <textarea class="emby-input" id="txtMergeMoviesLibraryList" is="emby-input" name="txtMergeMoviesLibraryList" rows="2"></textarea>
+                            <div class="fieldDescription">逗号分隔的媒体库名单，只有名单内的库参与合并。留空 = 全选（所有电影库）。</div>
+                        </div>
+
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input id="chkMergeMultiVersionWithParts" is="emby-checkbox" name="chkMergeMultiVersionWithParts" type="checkbox"/>
+                                <span>Merge with CD parts</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">关闭（默认）：番号组内任意条目带多 CD part 时整组不合并。打开：允许合并带 CD part 的条目，但要求组内每个番号的 part 数量完全一致，否则跳过。</div>
+                        </div>
+                    </div>
+                </div>
                 </div>
 
                 <div>
@@ -491,6 +547,23 @@
             $('.selectBackupOpenAiTranslatorGoOpenAi').css('display', goOpenAi ? 'inherit' : 'none');
         });
 
+        // ===== 配置页 Tab 分组 =====
+        $('.metatube-config-tabs').on('tabchange', function (e) {
+            var index = e.detail ? e.detail.selectedTabIndex : 0;
+            $('.metatube-tab-page').css('display', 'none');
+            $('.metatube-tab-page[data-index="' + index + '"]').css('display', 'inherit');
+        });
+
+        // ===== 多版本合并：开关控制下方配置显隐 =====
+        $('#chkMergeMultiVersion').on('change', function () {
+            $('.mergeMultiVersionEnabled').css('display', this.checked ? 'inherit' : 'none');
+        });
+
+        function refreshMergeToggle(page) {
+            var enabled = page.querySelector('#chkMergeMultiVersion').checked;
+            $('.mergeMultiVersionEnabled').css('display', enabled ? 'inherit' : 'none');
+        }
+
         function refreshBackupToggle(page) {
             var enabled = page.querySelector('#chkEnableBackupTranslation').checked;
             $('#backupTranslationSection').css('display', enabled ? 'inherit' : 'none');
@@ -556,6 +629,11 @@
                 $('#txtActorRawSubstitutionTable', page).val(config.ActorRawSubstitutionTable).change();
                 page.querySelector('#chkEnableGenreSubstitution').checked = config.EnableGenreSubstitution;
                 $('#txtGenreRawSubstitutionTable', page).val(config.GenreRawSubstitutionTable).change();
+                page.querySelector('#chkMergeMultiVersion').checked = config.MergeMultiVersion;
+                $('#selectMergeMoviesPreference', page).val(config.MergeMoviesPreference).change();
+                $('#txtMergeMoviesLibraryList', page).val(config.MergeMoviesLibraryList).change();
+                page.querySelector('#chkMergeMultiVersionWithParts').checked = config.MergeMultiVersionWithParts;
+                refreshMergeToggle(page);
                 Dashboard.hideLoadingMsg();
             });
         });
@@ -616,6 +694,10 @@
                 config.ActorRawSubstitutionTable = $('#txtActorRawSubstitutionTable', form).val();
                 config.EnableGenreSubstitution = $('#chkEnableGenreSubstitution', form).prop('checked');
                 config.GenreRawSubstitutionTable = $('#txtGenreRawSubstitutionTable', form).val();
+                config.MergeMultiVersion = $('#chkMergeMultiVersion', form).prop('checked');
+                config.MergeMoviesPreference = $('#selectMergeMoviesPreference', form).val();
+                config.MergeMoviesLibraryList = $('#txtMergeMoviesLibraryList', form).val();
+                config.MergeMultiVersionWithParts = $('#chkMergeMultiVersionWithParts', form).prop('checked');
                 ApiClient.updatePluginConfiguration(MetaTubePluginConfig.pluginUniqueId, config).then(Dashboard.processPluginConfigurationUpdateResult);
             });
             // Disable default form submission
