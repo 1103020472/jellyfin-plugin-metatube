@@ -70,33 +70,11 @@ public class ReviewService : IService
     private static readonly ConcurrentDictionary<string, byte> InFlight = new();
 
     /// <summary>
-    /// 把前端传来的 Id 解析成条目。
-    ///
-    /// Emby Web 的 <c>item.Id</c> 有两种形态：
-    ///   * 内部数字 Id（如 "84684"）—— 详情页最常见的形态，用 GetItemById(long)；
-    ///   * GUID 字符串 —— 用 GetItemById(Guid)。
-    /// 两者都尝试，避免因形态不同而 500。
+    /// 把前端传来的 Id 解析成条目（实现见 <see cref="ItemResolver"/>，与 VersionService 共用）。
     /// </summary>
     private static BaseItem ResolveItem(string rawId)
     {
-        if (string.IsNullOrWhiteSpace(rawId))
-            return null;
-
-        var id = rawId.Trim();
-
-        // 1. 内部数字 Id（Emby 4.x 详情页的 item.Id 常见形态）
-        if (long.TryParse(id, out var numericId))
-        {
-            var byLong = LibraryManager.GetItemById(numericId);
-            if (byLong != null)
-                return byLong;
-        }
-
-        // 2. GUID
-        if (Guid.TryParse(id, out var guid))
-            return LibraryManager.GetItemById(guid);
-
-        return null;
+        return ItemResolver.Resolve(LibraryManager, rawId);
     }
 
     /// <summary>
@@ -117,7 +95,7 @@ public class ReviewService : IService
 
         // 用条目的内部 Id 作为状态键：前端每次可能传不同形态的 Id，
         // 但同一个条目必须归一到同一个键，否则去重和进度查询都会失效。
-        var key = item.InternalId != 0 ? item.InternalId.ToString() : item.Id.ToString();
+        var key = ItemResolver.Key(item);
 
         // 已在跑 → 直接复用，不重复启动
         if (!InFlight.TryAdd(key, 1))
@@ -187,7 +165,7 @@ public class ReviewService : IService
         // 与 Post 用同一种方式归一 Id，否则进度查询会查不到
         var item = ResolveItem(request.ItemId);
         var key = item != null
-            ? (item.InternalId != 0 ? item.InternalId.ToString() : item.Id.ToString())
+            ? ItemResolver.Key(item)
             : (request.ItemId ?? string.Empty).Trim();
 
         if (States.TryGetValue(key, out var state))

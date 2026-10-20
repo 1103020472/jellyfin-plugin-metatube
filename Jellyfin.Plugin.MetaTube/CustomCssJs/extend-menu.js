@@ -597,6 +597,39 @@
             });
         }
 
+        // =========================
+        // 拆分版本 / 取消手动拆分标记
+        //   合并状态（MediaSources 里还有别的版本）→ 给「拆分」入口；
+        //   已打过手动拆分标记 → 给「取消标记」入口（取消后允许自动合并）。
+        // =========================
+        if (item?.Id) {
+            const splitMarked = hasSplitMarker(item.Overview);
+
+            if (isMergedItem(item)) {
+                buttonsToCreate.push({
+                    type: 'split',
+                    icon: 'call_split',
+                    text: '🔓 拆分版本（手动）',
+                    handler: async () => {
+                        closeMenu();
+                        await splitVersions(item);
+                    }
+                });
+            }
+
+            if (splitMarked) {
+                buttonsToCreate.push({
+                    type: 'merge',
+                    icon: 'merge_type',
+                    text: '🔗 取消手动拆分标记',
+                    handler: async () => {
+                        closeMenu();
+                        await unmarkSplitVersions(item);
+                    }
+                });
+            }
+        }
+
         // 倒序插入以保持置顶和正常的排列顺序
         for (let i = buttonsToCreate.length - 1; i >= 0; i--) {
             const btnData = buttonsToCreate[i];
@@ -838,6 +871,132 @@
             toast(`❌ 拉取评论失败: ${e.message || e}`);
         } finally {
             pullReviews._running = false;
+        }
+    }
+
+    // =========================
+    // 手动拆分版本（拆分 + 打标记）
+    //
+    // 为什么需要标记：
+    //   合并任务（MergeMultiVersionsTask）按 MetaTube 番号把多个版本合成一个条目，
+    //   而且每次扫库后还会自动再合并一次。用户手动拆开的版本如果不留记号，
+    //   下一次扫描就被自动合回去了。
+    //
+    // 标记写在条目概述末尾（与 <metatube-reviews/> 同一套约定）：
+    //   <metatube-split/>
+    //   HTML 渲染时不可见，插件后端（ManualSplitMarker）读写它来做过滤。
+    //
+    // 拆分动作本身仍然调 Emby 自己的接口：
+    //   POST /emby/Videos/{主条目Id}/AlternateSources/Delete
+    //   版本分组、媒体源归属这些都是 Emby 内部实现，插件只负责打标记。
+    //
+    // 顺序不能反：必须先从 MediaSources 拿到全组条目 Id，再拆分（拆完就只剩自己一个源了），
+    // 然后带着这些 Id 去后端打标记。
+    // =========================
+    const SPLIT_MARKER = '<metatube-split/>';
+
+    function hasSplitMarker(overview) {
+        return `${overview || ''}`.indexOf(SPLIT_MARKER) >= 0;
+    }
+
+    // 组内所有版本的条目 Id：合并状态下 item.MediaSources 会列出全部版本，
+    // 每个源的 ItemId 就是那个版本自己的条目 Id。
+    function getSplitTargetIds(item) {
+        const ids = [];
+        for (const source of (item?.MediaSources || [])) {
+            const id = `${source?.ItemId || ''}`.trim();
+            if (id && ids.indexOf(id) < 0) ids.push(id);
+        }
+        const ownId = `${item?.Id || ''}`.trim();
+        if (ownId && ids.indexOf(ownId) < 0) ids.push(ownId);
+        return ids;
+    }
+
+    // 拆分请求要发给主条目（Type=Default 那个源所属的条目）
+    function getPrimaryVersionId(item, ids) {
+        const def = (item?.MediaSources || []).find(s => `${s?.Type || ''}` === 'Default' && s?.ItemId);
+        const id = `${def?.ItemId || ''}`.trim();
+        return id || ids[0] || `${item?.Id || ''}`.trim();
+    }
+
+    function isMergedItem(item) {
+        const sources = item?.MediaSources || [];
+        return sources.length > 1 || sources.some(s => `${s?.Type || ''}` === 'Grouping');
+    }
+
+    async function ungroupVersions(itemId) {
+        const client = window.ApiClient;
+        if (!client) throw new Error('ApiClient 不可用');
+
+        // 首选官方 API 封装（与详情页自带的「拆分版本」等价）
+        if (typeof client.ungroupVersions === 'function') {
+            return client.ungroupVersions(itemId);
+        }
+
+        // 兜底：直接打接口（ApiClient 没暴露该方法时）
+        const url = client.getUrl(`Videos/${itemId}/AlternateSources/Delete`);
+        const token = encodeURIComponent(client.accessToken());
+        const res = await fetch(`${url}${url.indexOf('?') >= 0 ? '&' : '?'}X-Emby-Token=${token}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}'
+        });
+        if (!res.ok) throw new Error(`拆分接口返回 HTTP ${res.status}`);
+        return null;
+    }
+
+    function markVersions(ids, marked) {
+        const list = ids.map(v => encodeURIComponent(v)).join(',');
+        return apiPost(`/MetaTube/Versions/SplitMark?Marked=${marked ? 'true' : 'false'}&ItemIds=${list}`);
+    }
+
+    async function splitVersions(item) {
+        if (splitVersions._running) {
+            toast('⏳ 正在处理中，请稍候…');
+            return;
+        }
+        splitVersions._running = true;
+
+        try {
+            const ids = getSplitTargetIds(item);
+            if (ids.length < 2) {
+                toast('⚠️ 这个条目只有 1 个版本，不需要拆分');
+                return;
+            }
+
+            toast('🔓 正在拆分版本…');
+            await ungroupVersions(getPrimaryVersionId(item, ids));
+
+            // 拆分成功后再打标记：标记失败也只会让自动合并把版本合回去（可重试），
+            // 不会留下「标记了但没拆开」的状态。
+            const result = await markVersions(ids, true);
+            if (result?.Status === 'invalid') {
+                toast(`⚠️ 已拆分，但标记失败：${result.Message || '未知原因'}`);
+            } else {
+                toast(`✅ ${result?.Message || `已拆分并标记 ${ids.length} 个版本`}`);
+            }
+
+            setTimeout(() => location.reload(), 1500);
+        } catch (e) {
+            console.error('[JAV MENU] 拆分版本失败:', e);
+            toast(`❌ 拆分失败: ${e.message || e}`);
+        } finally {
+            splitVersions._running = false;
+        }
+    }
+
+    async function unmarkSplitVersions(item) {
+        try {
+            const result = await markVersions(getSplitTargetIds(item), false);
+            if (result?.Status === 'invalid') {
+                toast(`❌ ${result.Message || '取消标记失败'}`);
+                return;
+            }
+            toast(`✅ ${result?.Message || '已取消标记'}`);
+            setTimeout(() => location.reload(), 1200);
+        } catch (e) {
+            console.error('[JAV MENU] 取消拆分标记失败:', e);
+            toast(`❌ 取消标记失败: ${e.message || e}`);
         }
     }
 

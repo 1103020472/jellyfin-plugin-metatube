@@ -460,10 +460,12 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>
     /// 多版本合并总开关。打开后：媒体库扫描完成时自动合并同一番号的多个版本
     /// （按 MetaTube ProviderId 分组），也可在计划任务里手动运行。
+    /// 从详情页「拆分版本」手动拆开过的条目（Overview 里带
+    /// <see cref="ManualSplitMarker.OverviewMarker"/>）不参与合并。
     /// </summary>
 #if __EMBY__
     [DisplayName("Merge multi versions")]
-    [Description("Auto merge multiple versions of the same video (same MetaTube id) after library scans. Also available as a scheduled task.")]
+    [Description("Auto merge multiple versions of the same video (same MetaTube id) after library scans. Items manually split from the detail page are excluded. Also available as a scheduled task.")]
     [Required]
 #endif
     public bool MergeMultiVersion { get; set; } = false;

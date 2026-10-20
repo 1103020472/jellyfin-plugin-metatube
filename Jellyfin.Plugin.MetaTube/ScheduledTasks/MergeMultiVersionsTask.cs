@@ -1,13 +1,15 @@
 using Jellyfin.Plugin.MetaTube.Configuration;
 using Jellyfin.Plugin.MetaTube.Extensions;
 using MediaBrowser.Controller.Entities;
+// Movie 类型在两个平台都在 ...Entities.Movies 命名空间下，
+// 之前只在 __EMBY__ 里 import，导致 Jellyfin 配置编译不过（Movie 未定义）。
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Tasks;
 using static Jellyfin.Plugin.MetaTube.Configuration.PluginConfiguration;
 #if __EMBY__
-using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Model.Logging;
 
 #else
@@ -27,6 +29,11 @@ namespace Jellyfin.Plugin.MetaTube.ScheduledTasks;
 /// 触发方式：
 ///   1. 媒体库扫描完成后自动执行（<see cref="MergeMultiVersionPostScanTask"/>，受总开关控制）；
 ///   2. 作为普通计划任务手动运行或配置定时触发。
+///
+/// 合并范围排除「已手动拆分」的条目：详情页「拆分版本」按钮会给拆出来的每个条目在
+/// Overview 里写 <see cref="ManualSplitMarker.OverviewMarker"/>，带标记的条目不会参与
+/// 自动合并（见 <see cref="ExcludeManuallySplit"/>），否则用户手动拆开的版本会被下一次
+/// 扫库重新合并回去。
 /// </summary>
 public class MergeMultiVersionsTask : IScheduledTask
 {
@@ -232,11 +239,39 @@ public class MergeMultiVersionsTask : IScheduledTask
             .GroupBy(m => m.GetProviderId(Plugin.Instance.Name), StringComparer.OrdinalIgnoreCase)
             .Where(g => g.Select(m => m.Id).Distinct().Count() > 1)
             .Select(g => g.ToList())
+            // 手动拆分标记：见 ExcludeManuallySplit 注释。
+            .Select(ExcludeManuallySplit)
+            .Where(g => g.Count > 1)
             // CD part 检查：见 FilterByPartPolicy 注释。
             .Where(FilterByPartPolicy)
             .ToList();
 
         return groups;
+    }
+
+    /// <summary>
+    /// 把「已手动拆分」的条目从合并范围里剔掉。
+    ///
+    /// 用户在详情页点「拆分版本」后，插件会给拆出来的每个条目在 Overview 末尾写上
+    /// <see cref="ManualSplitMarker.OverviewMarker"/>。这些条目必须排除在自动合并之外，
+    /// 否则下一次扫库（<see cref="MergeMultiVersionPostScanTask"/>，与手动运行同一个
+    /// <see cref="Execute"/> 实现）又会把用户刚拆开的版本合回去。
+    ///
+    /// 规则是「只合并没有手动拆分标记的 item」：标记条目剔除后，
+    /// 组内剩余不足 2 个条目时该组自然不会再合并。
+    /// </summary>
+    private List<Movie> ExcludeManuallySplit(List<Movie> group)
+    {
+        var kept = group.Where(m => !ManualSplitMarker.IsMarked(m)).ToList();
+        if (kept.Count == group.Count)
+            return kept;
+
+        var skipped = group.Where(ManualSplitMarker.IsMarked).ToList();
+        _logger.Info(
+            "MergeMultiVersions - keep out {0} manually split item(s), {1} left to merge: {2}",
+            skipped.Count, kept.Count, string.Join(" / ", skipped.Select(m => m.Name)));
+
+        return kept;
     }
 
     /// <summary>
