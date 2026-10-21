@@ -166,9 +166,9 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         if (Configuration.EnableTitleSubstitution)
             m.Title = Configuration.GetTitleSubstitutionTable().Substitute(m.Title);
 
-        // Substitute actors.
+        // Substitute actors（别名 -> 常用名，同时应用排除名单）。
         if (Configuration.EnableActorSubstitution)
-            m.Actors = Configuration.GetActorSubstitutionTable().Substitute(m.Actors).ToArray();
+            m.Actors = Configuration.GetActorSubstitutionMap().Substitute(m.Actors).ToArray();
 
         // Substitute genres.
         if (Configuration.EnableGenreSubstitution)

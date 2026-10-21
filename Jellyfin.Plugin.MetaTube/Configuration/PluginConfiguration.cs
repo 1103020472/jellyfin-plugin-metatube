@@ -549,9 +549,23 @@ public class PluginConfiguration : BasePluginConfiguration
         set => Substitution.ActorRawSubstitutionTable = value;
     }
 
-    public SubstitutionTable GetActorSubstitutionTable()
+    [Browsable(false)]
+    public bool EnableActorExclusion
     {
-        return Substitution.GetActorSubstitutionTable();
+        get => Substitution.EnableActorExclusion;
+        set => Substitution.EnableActorExclusion = value;
+    }
+
+    [Browsable(false)]
+    public string ActorRawExclusionList
+    {
+        get => Substitution.ActorRawExclusionList;
+        set => Substitution.ActorRawExclusionList = value;
+    }
+
+    public ActorSubstitutionMap GetActorSubstitutionMap()
+    {
+        return Substitution.GetActorSubstitutionMap();
     }
 
     [Browsable(false)]

@@ -154,8 +154,9 @@ internal sealed class MetaTubeMainPageController : IPluginUIPageController, IHas
             c => c.BackupTranslation, (c, v) => c.BackupTranslation = v));
         _tabPages.Add(CreateTab("MetadataOptions", "评论 / 刷新",
             c => c.Metadata, (c, v) => c.Metadata = v));
-        _tabPages.Add(CreateTab("SubstitutionOptions", "替换表",
-            c => c.Substitution, (c, v) => c.Substitution = v));
+        // 替换表用自定义界面（列表 + 编辑表单），不走反射表单
+        _tabPages.Add(new PluginTabPageController("SubstitutionOptions", "替换表",
+            () => SubstitutionTabView.FromConfiguration()));
         _tabPages.Add(CreateTab("MergeOptions", "多版本合并",
             c => c.Merge, (c, v) => c.Merge = v));
     }

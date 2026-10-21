@@ -531,23 +531,47 @@ public class SubstitutionOptions
     public bool EnableActorSubstitution { get; set; } = false;
 
 #if __EMBY__
-    [DisplayName("演员替换表")]
+    [DisplayName("启用演员排除名单")]
+    [Description("刮削结果里出现下面名单中的名字时，直接从演员列表里剔除。")]
+#endif
+    public bool EnableActorExclusion { get; set; } = true;
+
+#if __EMBY__
+    [DisplayName("演员替换表（高级 / 纯文本）")]
     [Description(
-        "每行一条记录，用等号分隔。等号右侧留空表示删除左侧的演员名。")]
-    [EditMultiline(5)]
+        "一行一位演员：常用名 = 别名1, 别名2。等号左边是最终显示的名字。老格式「别名=常用名」仍可识别。")]
+    [EditMultiline(8)]
 #endif
     public string ActorRawSubstitutionTable
     {
-        get => _actorSubstitutionTable?.ToString();
-        set => _actorSubstitutionTable = SubstitutionTable.Parse(value);
+        get => _actorRawSubstitutionTable;
+        set => _actorRawSubstitutionTable = value ?? string.Empty;
     }
 
-    public SubstitutionTable GetActorSubstitutionTable()
+    private string _actorRawSubstitutionTable = string.Empty;
+
+#if __EMBY__
+    [DisplayName("演员排除名单（纯文本）")]
+    [Description("一行一个名字。命中后该演员不会出现在影片的演职员里。")]
+    [EditMultiline(4)]
+#endif
+    public string ActorRawExclusionList
     {
-        return _actorSubstitutionTable;
+        get => _actorRawExclusionList;
+        set => _actorRawExclusionList = value ?? string.Empty;
     }
 
-    private SubstitutionTable _actorSubstitutionTable;
+    private string _actorRawExclusionList = string.Empty;
+
+    /// <summary>
+    /// 解析后的演员替换表（含可选排除名单）。
+    /// </summary>
+    public ActorSubstitutionMap GetActorSubstitutionMap()
+    {
+        return ActorSubstitutionMap.Parse(
+            ActorRawSubstitutionTable,
+            EnableActorExclusion ? ActorRawExclusionList : string.Empty);
+    }
 
 #if __EMBY__
     [DisplayName("启用类型替换")]
