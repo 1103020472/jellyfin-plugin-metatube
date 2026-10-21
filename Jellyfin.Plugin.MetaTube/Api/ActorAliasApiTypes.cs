@@ -65,8 +65,11 @@ public class LinkActorAliasResult
 /// <summary>
 /// 查一个演员名在替换表里的身份：是常用名？还是某个常用名下的别名？
 /// 演员页的按钮文案要靠它显示「当前常用名：xxx」/「当前别名：xxx、xxx」。
+///
+/// 只读查询，用 GET（和 /MetaTube/Reviews/Status 一样）。前端 apiGet 发的
+/// 就是 GET，声明成 POST 会 404。
 /// </summary>
-[Route("/MetaTube/ActorAlias/Lookup", "POST", Summary = "查询演员名在替换表里的身份")]
+[Route("/MetaTube/ActorAlias/Lookup", "GET", Summary = "查询演员名在替换表里的身份")]
 [Authenticated]
 public class LookupActorAlias : IReturn<LookupActorAliasResult>
 {

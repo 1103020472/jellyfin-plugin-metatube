@@ -40,7 +40,7 @@ public class ActorAliasService : IService
     /// 查这个名字在替换表里的身份，供演员页按钮显示
     /// 「当前常用名：xxx」/「当前别名：xxx、xxx」。
     /// </summary>
-    public object Post(LookupActorAlias request)
+    public object Get(LookupActorAlias request)
     {
         var name = (request.Name ?? string.Empty).Trim();
 
