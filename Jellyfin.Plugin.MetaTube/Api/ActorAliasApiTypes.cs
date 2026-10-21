@@ -61,4 +61,37 @@ public class LinkActorAliasResult
     /// <summary>本次是否新建了常用名。</summary>
     public bool Created { get; set; }
 }
+
+/// <summary>
+/// 查一个演员名在替换表里的身份：是常用名？还是某个常用名下的别名？
+/// 演员页的按钮文案要靠它显示「当前常用名：xxx」/「当前别名：xxx、xxx」。
+/// </summary>
+[Route("/MetaTube/ActorAlias/Lookup", "POST", Summary = "查询演员名在替换表里的身份")]
+[Authenticated]
+public class LookupActorAlias : IReturn<LookupActorAliasResult>
+{
+    /// <summary>要查询的演员名。</summary>
+    public string Name { get; set; }
+}
+
+/// <summary>查询结果。</summary>
+public class LookupActorAliasResult
+{
+    /// <summary>
+    /// common = 这个名字本身就是一条常用名（Aliases 是它下面挂的别名）
+    /// alias  = 这个名字是某个常用名下的别名（CommonName 是所属常用名）
+    /// none   = 表里没有这个名字
+    /// invalid = 参数问题
+    /// error  = 服务端异常
+    /// </summary>
+    public string Status { get; set; }
+
+    public string Name { get; set; }
+
+    /// <summary>所属（或自身即）常用名。</summary>
+    public string CommonName { get; set; }
+
+    /// <summary>该常用名下的全部别名。</summary>
+    public string[] Aliases { get; set; } = Array.Empty<string>();
+}
 #endif

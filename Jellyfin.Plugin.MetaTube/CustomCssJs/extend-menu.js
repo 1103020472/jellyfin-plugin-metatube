@@ -668,14 +668,17 @@
         //   注意这里是同步判断，见 primeIsAdmin 的注释。
         // =========================
         if (item?.Type === 'Person' && item?.Name && isAdminReady()) {
+            const personName = item.Name;
             buttonsToCreate.push({
                 type: 'alias',
                 icon: 'person_add',
-                text: `🔗 关联为常用名（当前：${item.Name}）`,
+                text: aliasButtonText(personName),
                 handler: async () => {
                     closeMenu();
-                    await linkActorAlias(item.Name);
-                }
+                    await linkActorAlias(personName);
+                },
+                // 查询结果回来后只改文字，不重排菜单
+                afterInject: (btn) => refreshAliasButtonText(personName, btn)
             });
         }
 
@@ -803,6 +806,14 @@
                 btnData.handler,
                 isLastCustomButton
             );
+
+            if (typeof btnData.afterInject === 'function') {
+                try {
+                    btnData.afterInject(btnNode);
+                } catch (e) {
+                    console.warn('[JAV MENU] 按钮后处理失败:', e);
+                }
+            }
 
             currentContainer.insertBefore(btnNode, currentContainer.firstChild);
         }
@@ -1208,6 +1219,91 @@
     // 就是一条常用名），这里只负责把后端的话原样讲给用户，需要拍板的
     // 情况再弹一次确认，确认后带标记重发。
     // =========================
+    // =========================
+    // 「这个名字现在关联到哪」的查询缓存
+    //
+    // 演员页菜单要显示「当前常用名：xxx」或「当前别名：xxx、xxx」。
+    // 做法：
+    //   1. 注入时先用缓存里的结果拼文案（没缓存就先显示 plain 版），
+    //      绝不在注入路径上 await —— 见 scheduleInjectMenu 里的说明；
+    //   2. 注入完再补一次异步查询，结果回来后只改这一个按钮的文字
+    //      （不重排菜单，避免按钮在用户手指底下消失）。
+    // =========================
+    const ALIAS_LOOKUP_CACHE = new Map();   // name -> { status, commonName, aliases }
+    const ALIAS_LOOKUP_PENDING = new Map(); // name -> Promise
+    const ALIAS_LABEL_MAX = 3;              // 别名列表最多显示几个
+
+    function clearAliasLookupCache() {
+        ALIAS_LOOKUP_CACHE.clear();
+        ALIAS_LOOKUP_PENDING.clear();
+    }
+
+    function lookupActorAlias(name) {
+        if (ALIAS_LOOKUP_CACHE.has(name)) {
+            return Promise.resolve(ALIAS_LOOKUP_CACHE.get(name));
+        }
+
+        if (ALIAS_LOOKUP_PENDING.has(name)) {
+            return ALIAS_LOOKUP_PENDING.get(name);
+        }
+
+        const promise = apiGet('/MetaTube/ActorAlias/Lookup?Name=' + encodeURIComponent(name))
+            .then(function (res) {
+                const info = {
+                    status: res?.Status || 'none',
+                    commonName: `${res?.CommonName || ''}`,
+                    aliases: Array.isArray(res?.Aliases) ? res.Aliases.map(String) : []
+                };
+                ALIAS_LOOKUP_CACHE.set(name, info);
+                return info;
+            })
+            .catch(function (e) {
+                console.warn('[JAV MENU] 查询演员关联失败:', e);
+                return { status: 'error', commonName: '', aliases: [] };
+            })
+            .then(function (info) {
+                ALIAS_LOOKUP_PENDING.delete(name);
+                return info;
+            });
+
+        ALIAS_LOOKUP_PENDING.set(name, promise);
+        return promise;
+    }
+
+    function aliasButtonText(name) {
+        const info = ALIAS_LOOKUP_CACHE.get(name);
+        if (!info) return '🔗 关联常用名';
+
+        if (info.status === 'alias' && info.commonName) {
+            return `🔗 关联常用名（当前常用名：${info.commonName}）`;
+        }
+
+        if (info.status === 'common') {
+            const aliases = info.aliases || [];
+            if (aliases.length === 0) return '🔗 关联常用名（当前是常用名，还没有别名）';
+
+            const shown = aliases.slice(0, ALIAS_LABEL_MAX).join('、');
+            const more = aliases.length > ALIAS_LABEL_MAX ? ` 等 ${aliases.length} 个` : '';
+            return `🔗 关联常用名（当前别名：${shown}${more}）`;
+        }
+
+        return '🔗 关联常用名';
+    }
+
+    /// 注入后补一次查询，只更新这一个按钮的文案
+    async function refreshAliasButtonText(name, button) {
+        try {
+            await lookupActorAlias(name);
+        } catch (e) {
+            return;
+        }
+
+        const label = button?.querySelector('.listItemBodyText');
+        if (!label) return;
+
+        label.textContent = aliasButtonText(name);
+    }
+
     async function linkActorAlias(alias) {
         // 用户通常是先把常用名复制好再点按钮的，能读剪贴板就直接填上
         let preset = '';
@@ -1220,7 +1316,7 @@
         }
 
         const common = await promptText(
-            '关联为常用名',
+            '关联常用名',
             `把「${alias}」挂到哪个常用名下？\n（填那位演员现在用的正式名字，以后刮到这个旧名会自动换成它）`,
             preset,
             '常用名',
@@ -1251,9 +1347,12 @@
 
             switch (res?.Status) {
                 case 'ok':
+                    // 关联改的是配置，按钮上的「当前常用名 / 当前别名」得重新查
+                    clearAliasLookupCache();
                     toast(`✅ ${res.Message}`);
                     break;
                 case 'exists':
+                    clearAliasLookupCache();
                     toast(`ℹ️ ${res.Message}`);
                     break;
                 case 'confirm': {

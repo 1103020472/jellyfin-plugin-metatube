@@ -36,6 +36,57 @@ public class ActorAliasService : IService
         }
     }
 
+    /// <summary>
+    /// 查这个名字在替换表里的身份，供演员页按钮显示
+    /// 「当前常用名：xxx」/「当前别名：xxx、xxx」。
+    /// </summary>
+    public object Post(LookupActorAlias request)
+    {
+        var name = (request.Name ?? string.Empty).Trim();
+
+        try
+        {
+            if (name.Length == 0)
+                return new LookupActorAliasResult { Status = "invalid" };
+
+            var options = Plugin.Instance.Configuration.Substitution;
+            var map = ActorSubstitutionMap.Parse(options.ActorRawSubstitutionTable, options.ActorRawExclusionList);
+
+            // 1. 它本身就是一条常用名
+            var self = map.Find(name);
+            if (self != null)
+            {
+                return new LookupActorAliasResult
+                {
+                    Status = "common",
+                    Name = name,
+                    CommonName = self.CommonName,
+                    Aliases = self.Aliases.ToArray()
+                };
+            }
+
+            // 2. 它是某个常用名下的别名
+            var owner = map.Groups.FirstOrDefault(g => g.Aliases.Any(a => Same(a, name)));
+            if (owner != null)
+            {
+                return new LookupActorAliasResult
+                {
+                    Status = "alias",
+                    Name = name,
+                    CommonName = owner.CommonName,
+                    Aliases = owner.Aliases.ToArray()
+                };
+            }
+
+            return new LookupActorAliasResult { Status = "none", Name = name };
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("[MetaTube] 查询演员别名失败: {0}", ex.Message);
+            return new LookupActorAliasResult { Status = "error", Name = name };
+        }
+    }
+
     private static LinkActorAliasResult Link(LinkActorAlias request)
     {
         var aliases = SplitAliases(request.Alias);
