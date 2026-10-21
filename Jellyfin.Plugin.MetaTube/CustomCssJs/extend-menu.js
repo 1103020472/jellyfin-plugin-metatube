@@ -206,6 +206,145 @@
     }
 
     // =========================
+    // 简易模态框（输入 / 确认）
+    //
+    // Emby 4.9 没有现成的 prompt 组件，这里只要「输入一个名字」和
+    // 「确认一下」两种形态，所以用纯 DOM 自建，不去依赖会变的内置模块。
+    // =========================
+    const MODAL_ID = 'jav-alias-modal';
+
+    function showModal(options) {
+        return new Promise((resolve) => {
+            const opt = options || {};
+            const title = opt.title || '';
+            const message = opt.message || '';
+            const withInput = !!opt.withInput;
+            const okText = opt.okText || '确定';
+            const cancelText = opt.cancelText || '取消';
+
+            const old = document.getElementById(MODAL_ID);
+            if (old) old.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = MODAL_ID;
+            overlay.style.cssText = [
+                'position:fixed', 'inset:0', 'z-index:2147483000',
+                'background:rgba(0,0,0,0.6)',
+                'display:flex', 'align-items:center', 'justify-content:center'
+            ].join(';');
+
+            const box = document.createElement('div');
+            box.style.cssText = [
+                'min-width:340px', 'max-width:520px', 'padding:20px 22px',
+                'border-radius:10px', 'background:#202020', 'color:#fff',
+                'box-shadow:0 8px 32px rgba(0,0,0,0.6)',
+                'font-size:15px', 'line-height:1.6'
+            ].join(';');
+
+            const titleEl = document.createElement('div');
+            titleEl.textContent = title;
+            titleEl.style.cssText = 'font-size:17px;font-weight:600;margin-bottom:10px';
+            box.appendChild(titleEl);
+
+            if (message) {
+                const msgEl = document.createElement('div');
+                msgEl.textContent = message;
+                msgEl.style.cssText = 'opacity:.85;white-space:pre-wrap;margin-bottom:14px';
+                box.appendChild(msgEl);
+            }
+
+            let inputEl = null;
+            if (withInput) {
+                inputEl = document.createElement('input');
+                inputEl.type = 'text';
+                inputEl.value = opt.value || '';
+                inputEl.placeholder = opt.placeholder || '';
+                inputEl.style.cssText = [
+                    'width:100%', 'box-sizing:border-box', 'padding:10px 12px',
+                    'border-radius:6px', 'border:1px solid rgba(255,255,255,0.25)',
+                    'background:rgba(255,255,255,0.06)', 'color:#fff', 'font-size:15px',
+                    'margin-bottom:16px', 'outline:none'
+                ].join(';');
+                box.appendChild(inputEl);
+            }
+
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end';
+
+            const mkBtn = function (text, primary) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = text;
+                btn.style.cssText = [
+                    'padding:8px 16px', 'border-radius:6px', 'cursor:pointer',
+                    'font-size:15px', 'border:0',
+                    primary
+                        ? 'background:#52b54b;color:#fff'
+                        : 'background:rgba(255,255,255,0.14);color:#fff'
+                ].join(';');
+                return btn;
+            };
+
+            const cancelBtn = mkBtn(cancelText, false);
+            const okBtn = mkBtn(okText, true);
+            row.appendChild(cancelBtn);
+            row.appendChild(okBtn);
+            box.appendChild(row);
+            overlay.appendChild(box);
+
+            const finish = function (ok) {
+                overlay.remove();
+                document.removeEventListener('keydown', onKey, true);
+                resolve({ ok: ok, value: inputEl ? inputEl.value.trim() : '' });
+            };
+
+            function onKey(e) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    finish(false);
+                } else if (e.key === 'Enter' && (!inputEl || document.activeElement === inputEl)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    finish(true);
+                }
+            }
+
+            cancelBtn.addEventListener('click', function () { finish(false); });
+            okBtn.addEventListener('click', function () { finish(true); });
+            overlay.addEventListener('click', function (e) {
+                if (e.target === overlay) finish(false);
+            });
+            document.addEventListener('keydown', onKey, true);
+
+            document.body.appendChild(overlay);
+            if (inputEl) {
+                inputEl.focus();
+                inputEl.select();
+            } else {
+                okBtn.focus();
+            }
+        });
+    }
+
+    async function promptText(title, message, value, placeholder, okText) {
+        const r = await showModal({
+            title: title,
+            message: message,
+            withInput: true,
+            value: value,
+            placeholder: placeholder,
+            okText: okText
+        });
+        return r.ok ? r.value : null;
+    }
+
+    async function confirmDialog(title, message, okText) {
+        const r = await showModal({ title: title, message: message, okText: okText });
+        return r.ok;
+    }
+
+    // =========================
     // 关闭菜单
     // =========================
     function closeMenu() {
@@ -441,7 +580,9 @@
     //  - 详情页：URL 里的 ?id=
     //  - 再叠加菜单标题，避免 id 取不到时判断不出来
     function menuContextKey() {
-        return `${getItemId() || ''}|${getTitle() || ''}`;
+        // 管理员状态也进 key：脚本刚加载时权限还没问回来，第一遍注入会少一个
+        // 「关联为常用名」按钮；权限回来后 key 变了，才会重新注入补上。
+        return `${getItemId() || ''}|${getTitle() || ''}|${isAdminReady() ? 'a' : '-'}`;
     }
 
     // =========================
@@ -517,6 +658,26 @@
 
         // 收集所有需要展示的按钮数据，以便找出哪一个是“最后一个自定义按钮”
         const buttonsToCreate = [];
+
+        // =========================
+        // 演员详情页：把这个名字挂到某个「常用名」下
+        //   场景：老番号刮出来的演员名还是旧艺名，想一次性关联到常用名，
+        //   以后刮到旧名自动换成常用名。名字直接取当前演员页的 Item.Name，
+        //   用户只需要粘贴/输入常用名。
+        //   改的是服务器配置，只对管理员显示（接口本身也要求管理员）。
+        //   注意这里是同步判断，见 primeIsAdmin 的注释。
+        // =========================
+        if (item?.Type === 'Person' && item?.Name && isAdminReady()) {
+            buttonsToCreate.push({
+                type: 'alias',
+                icon: 'person_add',
+                text: `🔗 关联为常用名（当前：${item.Name}）`,
+                handler: async () => {
+                    closeMenu();
+                    await linkActorAlias(item.Name);
+                }
+            });
+        }
 
         // 社交账号按钮放最上面（演员详情页最常用）。
         for (const rule of SOCIAL_RULES) {
@@ -1001,10 +1162,152 @@
     }
 
     // =========================
-    // 监听
+    // 当前用户是不是管理员
+    //
+    // ⚠️ 这里必须是「同步读缓存」，不能 await：injectMenu 里一旦多出一个 await，
+    //    就会出现「旧按钮已清掉、新按钮还没插上」的窗口，MutationObserver 在这个
+    //    窗口里又会触发一次 injectMenu，每次都会发一次 getItemInfo()，滚成
+    //    疯狂请求 /Items 的死循环（菜单点不动就是这么来的）。
+    //     所以：脚本加载时先问一次，结果缓存下来，注入时同步判断。
     // =========================
+    let isAdminCache = null;
+
+    function primeIsAdmin() {
+        if (primeIsAdmin._started) return;
+        primeIsAdmin._started = true;
+
+        try {
+            const promise = window.ApiClient.getCurrentUser();
+            if (!promise || typeof promise.then !== 'function') return;
+
+            promise.then(function (user) {
+                isAdminCache = user?.Policy?.IsAdministrator !== false;
+                // 权限结果回来得比第一次注入晚时，菜单可能已经渲染完了，补一次
+                if (isAdminCache) scheduleInjectMenu();
+            }).catch(function (e) {
+                // 拿不到就按「能用」处理：接口本身还会再校验一次权限
+                console.warn('[JAV MENU] 读取当前用户失败:', e);
+                isAdminCache = true;
+            });
+        } catch (e) {
+            console.warn('[JAV MENU] 读取当前用户异常:', e);
+            isAdminCache = true;
+        }
+    }
+
+    /// 还没问到结果时先不显示（避免非管理员看到点了会报错的按钮）
+    function isAdminReady() {
+        return isAdminCache === true;
+    }
+
+    // =========================
+    // 演员页：把当前名字挂到某个「常用名」下
+    //
+    // 用户的操作只有一个：粘贴/输入常用名。
+    // 各种边界都在后端判断（已经关联过 / 现在挂在别人下面 / 这个名字本身
+    // 就是一条常用名），这里只负责把后端的话原样讲给用户，需要拍板的
+    // 情况再弹一次确认，确认后带标记重发。
+    // =========================
+    async function linkActorAlias(alias) {
+        // 用户通常是先把常用名复制好再点按钮的，能读剪贴板就直接填上
+        let preset = '';
+        try {
+            const clip = await navigator.clipboard.readText();
+            const trimmed = `${clip || ''}`.trim();
+            if (trimmed && trimmed.length <= 60) preset = trimmed;
+        } catch (e) {
+            // 没权限就算了，用户自己输入
+        }
+
+        const common = await promptText(
+            '关联为常用名',
+            `把「${alias}」挂到哪个常用名下？\n（填那位演员现在用的正式名字，以后刮到这个旧名会自动换成它）`,
+            preset,
+            '常用名',
+            '关联'
+        );
+
+        if (common == null) return;
+        if (!common) {
+            toast('❌ 常用名不能为空');
+            return;
+        }
+
+        await submitAliasLink(alias, common, false, false);
+    }
+
+    async function submitAliasLink(alias, common, overwrite, merge) {
+        const qs = new URLSearchParams({
+            Alias: alias,
+            CommonName: common,
+            Overwrite: overwrite ? 'true' : 'false',
+            MergeGroup: merge ? 'true' : 'false'
+        });
+
+        showIndicator('🔗 正在关联…');
+        try {
+            const res = await apiPost(`/MetaTube/ActorAlias/Link?${qs.toString()}`);
+            hideIndicator();
+
+            switch (res?.Status) {
+                case 'ok':
+                    toast(`✅ ${res.Message}`);
+                    break;
+                case 'exists':
+                    toast(`ℹ️ ${res.Message}`);
+                    break;
+                case 'confirm': {
+                    const ok = await confirmDialog('需要确认', res.Message, '就这么改');
+                    if (!ok) return;
+                    await submitAliasLink(alias, common, res.NeedOverwrite || overwrite, res.NeedMerge || merge);
+                    break;
+                }
+                default:
+                    toast(`❌ ${res?.Message || '关联失败'}`);
+            }
+        } catch (e) {
+            hideIndicator();
+            console.error('[JAV MENU] 关联演员别名失败:', e);
+            toast(`❌ 关联失败: ${e.message || e}`);
+        }
+    }
+
+    // =========================
+    // 监听
+    //
+    // ⚠️ 必须防抖 + 防重入：injectMenu 自己要 remove 旧按钮、插新按钮，
+    //    这些 DOM 变动又会触发 MutationObserver；而 injectMenu 中间还有
+    //    await（取 Item 信息）。没有锁的话同一次菜单打开会被并发跑很多遍，
+    //    每一遍都发一次 /Items 请求，表现为「疯狂循环请求 Items、菜单点不动」。
+    // =========================
+    let injectBusy = false;
+    let injectTimer = null;
+
+    function scheduleInjectMenu(delay) {
+        if (injectTimer) return;
+
+        injectTimer = setTimeout(async function () {
+            injectTimer = null;
+
+            if (injectBusy) {
+                // 上一轮还没跑完，等它结束再说
+                scheduleInjectMenu(120);
+                return;
+            }
+
+            injectBusy = true;
+            try {
+                await injectMenu();
+            } catch (e) {
+                console.error('[JAV MENU] 注入菜单失败:', e);
+            } finally {
+                injectBusy = false;
+            }
+        }, delay || 60);
+    }
+
     const observer = new MutationObserver(() => {
-        injectMenu();
+        scheduleInjectMenu();
         scheduleLinkify();
     });
 
@@ -1014,6 +1317,8 @@
     });
 
     // 首屏（脚本加载时 DOM 可能已经渲染完）
+    primeIsAdmin();
     scheduleLinkify();
+    scheduleInjectMenu(0);
 
 })();
