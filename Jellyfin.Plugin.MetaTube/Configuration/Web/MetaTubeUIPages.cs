@@ -122,7 +122,7 @@ internal sealed class PluginTabPageController : IPluginUIPageController
 }
 
 /// <summary>
-/// 设置主页。它本身是第一个 tab（General），并通过 <see cref="IHasTabbedUIPages"/>
+/// 设置主页。它本身是第一个 tab（常规），并通过 <see cref="IHasTabbedUIPages"/>
 /// 把其余分组注册成 Emby Dashboard 顶部的一排 tab 页。
 /// </summary>
 internal sealed class MetaTubeMainPageController : IPluginUIPageController, IHasTabbedUIPages
@@ -142,21 +142,21 @@ internal sealed class MetaTubeMainPageController : IPluginUIPageController, IHas
             MenuIcon = "video_settings"
         };
 
-        _tabPages.Add(CreateTab("BadgeImageOptions", "Badge / Image",
+        _tabPages.Add(CreateTab("BadgeImageOptions", "角标 / 图片",
             c => c.BadgeImage, (c, v) => c.BadgeImage = v));
-        _tabPages.Add(CreateTab("ProviderOptions", "Provider / JavDB",
+        _tabPages.Add(CreateTab("ProviderOptions", "数据源 / JavDB",
             c => c.Provider, (c, v) => c.Provider = v));
-        _tabPages.Add(CreateTab("TemplateOptions", "Text template",
+        _tabPages.Add(CreateTab("TemplateOptions", "文本模板",
             c => c.Template, (c, v) => c.Template = v));
-        _tabPages.Add(CreateTab("TranslationOptions", "Translation",
+        _tabPages.Add(CreateTab("TranslationOptions", "翻译",
             c => c.Translation, (c, v) => c.Translation = v));
-        _tabPages.Add(CreateTab("BackupTranslationOptions", "Backup translation",
+        _tabPages.Add(CreateTab("BackupTranslationOptions", "备用翻译",
             c => c.BackupTranslation, (c, v) => c.BackupTranslation = v));
-        _tabPages.Add(CreateTab("MetadataOptions", "Reviews / Refresh",
+        _tabPages.Add(CreateTab("MetadataOptions", "评论 / 刷新",
             c => c.Metadata, (c, v) => c.Metadata = v));
-        _tabPages.Add(CreateTab("SubstitutionOptions", "Substitution",
+        _tabPages.Add(CreateTab("SubstitutionOptions", "替换表",
             c => c.Substitution, (c, v) => c.Substitution = v));
-        _tabPages.Add(CreateTab("MergeOptions", "Merge multi versions",
+        _tabPages.Add(CreateTab("MergeOptions", "多版本合并",
             c => c.Merge, (c, v) => c.Merge = v));
     }
 

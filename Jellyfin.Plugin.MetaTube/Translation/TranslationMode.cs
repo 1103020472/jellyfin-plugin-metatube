@@ -4,15 +4,15 @@ namespace Jellyfin.Plugin.MetaTube.Translation;
 
 public enum TranslationMode
 {
-    [Description("Disabled")]
+    [Description("不翻译")]
     Disabled,
 
-    [Description("Title")]
+    [Description("仅标题")]
     Title,
 
-    [Description("Summary")]
+    [Description("仅简介")]
     Summary,
 
-    [Description("Title and Summary")]
+    [Description("标题和简介")]
     Both
 }

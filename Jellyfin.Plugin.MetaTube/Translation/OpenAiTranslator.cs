@@ -10,13 +10,13 @@ public enum OpenAiTranslator
     /// <summary>
     /// 默认实现：github.com/xjasonlyu/openai-translator，保持历史行为不变。
     /// </summary>
-    [Description("openai-translator (default)")]
+    [Description("openai-translator（默认）")]
     OpenAiTranslator,
 
     /// <summary>
     /// github.com/sashabaranov/go-openai，支持额外参数（思考度）与最大 token 配置。
     /// </summary>
-    [Description("go-openai")]
+    [Description("go-openai（支持额外参数 / 最大 token）")]
     GoOpenAi
 }
 

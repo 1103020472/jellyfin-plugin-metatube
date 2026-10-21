@@ -28,8 +28,8 @@ public class PluginConfiguration : BasePluginConfiguration
 
     // ---- 分组（Emby 设置页上每个属性 => 一个折叠分组）----
 
-    [DisplayName("General")]
-    [Description("Server address, access token and the basic scraping switches.")]
+    [DisplayName("常规")]
+    [Description("服务端地址、访问令牌与基础刮削开关。")]
 #endif
     public GeneralOptions General
     {
@@ -43,8 +43,8 @@ public class PluginConfiguration : BasePluginConfiguration
     private GeneralOptions _general;
 
 #if __EMBY__
-    [DisplayName("Badge / Image")]
-    [Description("Subtitle badges and primary image output.")]
+    [DisplayName("角标 / 图片")]
+    [Description("中文字幕角标与主图输出。")]
 #endif
     public BadgeImageOptions BadgeImage
     {
@@ -58,8 +58,8 @@ public class PluginConfiguration : BasePluginConfiguration
     private BadgeImageOptions _badgeImage;
 
 #if __EMBY__
-    [DisplayName("Provider / JavDB")]
-    [Description("Movie provider filtering and the JavDB session cookie.")]
+    [DisplayName("数据源 / JavDB")]
+    [Description("数据源过滤与 JavDB 会话 Cookie。")]
 #endif
     public ProviderOptions Provider
     {
@@ -73,8 +73,8 @@ public class PluginConfiguration : BasePluginConfiguration
     private ProviderOptions _provider;
 
 #if __EMBY__
-    [DisplayName("Text template")]
-    [Description("Name and tagline templates.")]
+    [DisplayName("文本模板")]
+    [Description("标题与副标题模板。")]
 #endif
     public TemplateOptions Template
     {
@@ -88,8 +88,8 @@ public class PluginConfiguration : BasePluginConfiguration
     private TemplateOptions _template;
 
 #if __EMBY__
-    [DisplayName("Translation")]
-    [Description("Translation mode, engine and the credentials of the selected engine.")]
+    [DisplayName("翻译")]
+    [Description("翻译模式、翻译引擎，以及当前引擎对应的凭据。")]
 #endif
     public TranslationOptions Translation
     {
@@ -103,8 +103,8 @@ public class PluginConfiguration : BasePluginConfiguration
     private TranslationOptions _translation;
 
 #if __EMBY__
-    [DisplayName("Backup translation")]
-    [Description("Retry a single request with a second OpenAI-compatible endpoint when the primary one refuses to answer.")]
+    [DisplayName("备用翻译")]
+    [Description("主通道拒答时，用第二个 OpenAI 兼容接口重试该次请求。")]
 #endif
     public BackupTranslationOptions BackupTranslation
     {
@@ -118,8 +118,8 @@ public class PluginConfiguration : BasePluginConfiguration
     private BackupTranslationOptions _backupTranslation;
 
 #if __EMBY__
-    [DisplayName("Reviews / Refresh")]
-    [Description("Review fetching and metadata refresh behaviour.")]
+    [DisplayName("评论 / 刷新")]
+    [Description("评论抓取与元数据刷新行为。")]
 #endif
     public MetadataOptions Metadata
     {
@@ -133,8 +133,8 @@ public class PluginConfiguration : BasePluginConfiguration
     private MetadataOptions _metadata;
 
 #if __EMBY__
-    [DisplayName("Substitution")]
-    [Description("Keyword substitution tables for title / actor / genre.")]
+    [DisplayName("替换表")]
+    [Description("标题 / 演员 / 类型的关键字替换表。")]
 #endif
     public SubstitutionOptions Substitution
     {
@@ -148,8 +148,8 @@ public class PluginConfiguration : BasePluginConfiguration
     private SubstitutionOptions _substitution;
 
 #if __EMBY__
-    [DisplayName("Merge multi versions")]
-    [Description("Merge multiple versions of the same video after library scans.")]
+    [DisplayName("多版本合并")]
+    [Description("媒体库扫描完成后合并同一影片的多个版本。")]
 #endif
     public MergeOptions Merge
     {
@@ -583,7 +583,10 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>合并范围枚举：仅当前扫描的库，或全局所有电影库。</summary>
     public enum MergeMoviesScopeOption
     {
+        [Description("仅当前库")]
         LibraryScope,
+
+        [Description("全局")]
         GlobalScope
     }
 
