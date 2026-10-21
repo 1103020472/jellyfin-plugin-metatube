@@ -1,0 +1,644 @@
+using Jellyfin.Plugin.MetaTube.Helpers;
+using Jellyfin.Plugin.MetaTube.Translation;
+#if __EMBY__
+using System.ComponentModel;
+using Emby.Web.GenericEdit;
+using MediaBrowser.Model.Attributes;
+#endif
+
+namespace Jellyfin.Plugin.MetaTube.Configuration;
+
+// ============================================================
+// 配置分组
+//
+// Emby 的插件设置页不是手写 HTML，而是 Emby.Web.GenericEdit 按反射
+// 从 PluginConfiguration 自动生成的：只有「属性类型本身是可编辑子对象」
+// （继承 EditableOptionsBase）的属性，才会渲染成一个可折叠的分组面板。
+// 之前所有配置项都平铺在 PluginConfiguration 上，于是一整页全是散装字段。
+//
+// 现在按用途把配置拆到下面这些分组类里，PluginConfiguration 里每个分组
+// 对应一个属性 => Emby 设置页上就是一个个折叠分组。
+//
+// 兼容性：配置项名字一个都没改，PluginConfiguration 上仍保留同名的
+// 「兼容访问器」（读写都落到分组对象里），所以：
+//   * 插件内部所有 Configuration.Xxx 的现有代码不用改；
+//   * Jellyfin 端的手写 configPage.html（按扁平字段名读写）不用改；
+//   * 旧版配置文件（扁平结构的 MetaTube.json / XML）在反序列化时
+//     会被这些同名访问器自动写进分组对象，无需手写迁移逻辑。
+// ============================================================
+
+/// <summary>基础设置：服务端地址、令牌与刮削行为开关。</summary>
+public class GeneralOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "General";
+#endif
+
+#if __EMBY__
+    [DisplayName("Server")]
+    [Description("Full url of the MetaTube Server, HTTPS protocol is recommended.")]
+    [Required]
+#endif
+    public string Server { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Token")]
+    [Description("Access token for the MetaTube Server, or blank if no token is set by the backend.")]
+#endif
+    public string Token { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Enable collections")]
+    [Description("Automatically create collections by series.")]
+#endif
+    public bool EnableCollections { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Enable directors")]
+    [Description("Add directors to corresponding video metadata.")]
+#endif
+    public bool EnableDirectors { get; set; } = true;
+
+#if __EMBY__
+    [DisplayName("Enable ratings")]
+    [Description("Display community ratings from the original website.")]
+#endif
+    public bool EnableRatings { get; set; } = true;
+
+#if __EMBY__
+    [DisplayName("Enable trailers")]
+    [Description("Generate online video trailers in strm format.")]
+#endif
+    public bool EnableTrailers { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Enable real actor names")]
+    [Description("Search and replace with real actor names from AVBASE.")]
+#endif
+    public bool EnableRealActorNames { get; set; } = false;
+}
+
+/// <summary>角标与图片：中文字幕角标、主图比例、默认压缩质量。</summary>
+public class BadgeImageOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "Badge / Image";
+#endif
+
+#if __EMBY__
+    [DisplayName("Enable badges")]
+    [Description("Add Chinese subtitle badges to primary images.")]
+#endif
+    public bool EnableBadges { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Badge url")]
+    [Description("Custom badge url, PNG format is recommended. (default: zimu.png)")]
+#endif
+    public string BadgeUrl { get; set; } = "zimu.png";
+
+#if __EMBY__
+    [DisplayName("Primary image ratio")]
+    [Description("Aspect ratio for primary images, set a negative value to use the default.")]
+#endif
+    public double PrimaryImageRatio { get; set; } = -1;
+
+#if __EMBY__
+    [DisplayName("Default image quality")]
+    [Description("Default compression quality for JPEG images, set between 0 and 100. (default: 90)")]
+    [MinValue(0)]
+    [MaxValue(100)]
+    [Required]
+#endif
+    public int DefaultImageQuality { get; set; } = 90;
+}
+
+/// <summary>数据源：影片提供者过滤、JavDB 会话 cookie。</summary>
+public class ProviderOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "Provider / JavDB";
+#endif
+
+#if __EMBY__
+    [DisplayName("Enable movie provider filter")]
+    [Description("Filter and reorder search results from movie providers.")]
+#endif
+    public bool EnableMovieProviderFilter { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Movie provider filter")]
+    [Description(
+        "Provider names are case-insensitive, with decreasing precedence from left to right, separated by commas.")]
+#endif
+    public string RawMovieProviderFilter
+    {
+        get => _movieProviderFilter?.Any() == true ? string.Join(',', _movieProviderFilter) : string.Empty;
+        set => _movieProviderFilter = value?.Split(',').Select(s => s.Trim()).Where(s => s.Any())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    public List<string> GetMovieProviderFilter()
+    {
+        return _movieProviderFilter;
+    }
+
+    private List<string> _movieProviderFilter;
+
+#if __EMBY__
+    [DisplayName("JavDB cookie")]
+    [Description(
+        "JavDB 会话 cookie（如 _jdb_session=...），用于访问需要登录的条目（如 FC2 素人番号）。" +
+        "从浏览器登录 JavDB 后，在开发者工具(F12) → Network 里复制请求的 Cookie 头整个填入即可。留空则不携带。")]
+#endif
+    public string JavdbCookie { get; set; } = string.Empty;
+
+    /// <summary>解析后的 JavDB cookie；空白返回空字符串。</summary>
+    public string GetJavdbCookie()
+    {
+        return JavdbCookie?.Trim() ?? string.Empty;
+    }
+}
+
+/// <summary>文本模板：标题 / 副标题模板。</summary>
+public class TemplateOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "Text template";
+#endif
+
+#if __EMBY__
+    [DisplayName("Enable template")]
+    [Description("Enable the name / tagline templates below.")]
+#endif
+    public bool EnableTemplate { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Name template")]
+#endif
+    public string NameTemplate { get; set; } = PluginConfiguration.DefaultNameTemplate;
+
+#if __EMBY__
+    [DisplayName("Tagline template")]
+#endif
+    public string TaglineTemplate { get; set; } = PluginConfiguration.DefaultTaglineTemplate;
+}
+
+/// <summary>翻译：翻译模式、引擎与各引擎的凭据 / 参数。</summary>
+public class TranslationOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "Translation";
+#endif
+
+#if __EMBY__
+    [DisplayName("Translation mode")]
+    [Description("Disabled / Title / Summary / Both. Turning it on fills the engine settings below.")]
+#endif
+    public TranslationMode Mode { get; set; } = TranslationMode.Disabled;
+
+#if __EMBY__
+    [DisplayName("Translation engine")]
+    [Description("Baidu / Google / Google (Free) / DeepL / OpenAI. Only the matching credentials below are used.")]
+#endif
+    public TranslationEngine Engine { get; set; } = TranslationEngine.Baidu;
+
+#if __EMBY__
+    [DisplayName("Baidu app id")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.Baidu)]
+#endif
+    public string BaiduAppId { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Baidu app key")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.Baidu)]
+#endif
+    public string BaiduAppKey { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Google api key")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.Google)]
+#endif
+    public string GoogleApiKey { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Google api url")]
+    [Description("Custom Google translate api url. (optional)")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.Google)]
+#endif
+    public string GoogleApiUrl { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("DeepL api key")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.DeepL)]
+#endif
+    public string DeepLApiKey { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("DeepL api url")]
+    [Description("Custom DeepL-compatible api url. (optional)")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.DeepL)]
+#endif
+    public string DeepLApiUrl { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("OpenAI api key")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public string OpenAiApiKey { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("OpenAI api url")]
+    [Description("Custom OpenAI-compatible api url. (optional)")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public string OpenAiApiUrl { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("OpenAI model")]
+    [Description("Custom OpenAI-compatible api model. (optional)")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public string OpenAiModel { get; set; } = string.Empty;
+
+    // 翻译时使用的 OpenAI 客户端实现。默认（第一个枚举值）是 openai-translator，
+    // 保持历史行为；只有 go-openai 才会应用下面的额外参数与最大 token 配置。
+#if __EMBY__
+    [DisplayName("OpenAI translator")]
+    [Description(
+        "openai-translator (default) or go-openai. Only go-openai honors the extra params and max completion tokens below.")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public OpenAiTranslator OpenAiTranslator { get; set; }
+
+#if __EMBY__
+    [DisplayName("OpenAI extra params (JSON)")]
+    [Description("Extra JSON fields merged into the chat completion request body (go-openai only). To cut cost/latency on SiliconFlow reasoning models use {\"thinking_budget\": 1} (verified: reasoning tokens 1154 -> 2, 13s -> 1.3s). Other gateways differ, e.g. Zhipu {\"thinking\": {\"type\": \"disabled\"}}, vLLM {\"chat_template_kwargs\": {\"enable_thinking\": false}}.")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public string OpenAiExtraParams { get; set; } = string.Empty;
+
+    // 单次请求最多生成的 token 数（含思维链）。默认 4096，0 表示使用默认值；仅 go-openai 生效。
+#if __EMBY__
+    [DisplayName("OpenAI max completion tokens")]
+    [Description("Upper bound of generated tokens per request (including reasoning). Default 4096. go-openai only.")]
+    [VisibleCondition(nameof(Engine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
+#endif
+    public int OpenAiMaxCompletionTokens { get; set; } = 4096;
+
+    // 翻译时最大传输的文字个数，避免一次性传太多需要AI翻译很久
+#if __EMBY__
+    [DisplayName("Translation MaxChunkSize")]
+    [Description("Max characters sent to the LLM in one request. (default: 2000)")]
+#endif
+    public int MaxChunkSize { get; set; } = 2000;
+
+    /// <summary>
+    /// 翻译时同时发起的请求数上限（旧版本写死为 5）。
+    ///
+    /// 调大能缩短多分片评论的整体耗时（整体耗时由最慢的一片决定），
+    /// 但会同时压到翻译服务的速率限制；调小则更稳。
+    /// 改动后**无需重启**，下一次翻译请求就会按新值限流。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Translation concurrency")]
+    [Description(
+        "Max concurrent translation requests. Default 5. Takes effect without restart. Higher is faster but may hit provider rate limits.")]
+    [MinValue(1)]
+    [MaxValue(32)]
+#endif
+    public int MaxTranslationConcurrency { get; set; } = 5;
+
+    /// <summary>
+    /// 单次请求 MetaTube 服务端的超时时间（秒），默认 600（10 分钟）。
+    ///
+    /// 调用的主要是翻译接口，而翻译走大模型：单次摘要/评论分片在推理模型上
+    /// 可能要几十秒到数分钟。HttpClient 默认 100 秒会导致请求被中途取消而整段翻译失败。
+    /// 改动后**无需重启**，下一次请求就按新值计时。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("API request timeout")]
+    [Description(
+        "Timeout in seconds for a single MetaTube server request. Default 600. Translation runs on an LLM and can take minutes.")]
+    [MinValue(1)]
+    [MaxValue(7200)]
+#endif
+    public int RequestTimeoutSeconds { get; set; } = 600;
+
+    // 标题已经包含中文时，认为已经翻译过了
+#if __EMBY__
+    [DisplayName("Translation EnableCheck")]
+    [Description("Skip translation when the title already contains Chinese.")]
+#endif
+    public bool EnableCheck { get; set; } = false;
+}
+
+/// <summary>备用翻译通道：主通道返回拒答文案时，按请求粒度自动切换。</summary>
+public class BackupTranslationOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "Backup translation";
+#endif
+
+    /// <summary>
+    /// 备用翻译开关。部分中转站偶尔对某条文本返回
+    /// 「Sorry, I can't respond to this question」之类的拒答文案而不给译文；
+    /// 打开后，检测到该文案的那一次请求会改用下面的备用 OpenAI 参数重试（请求粒度切换，
+    /// 对上层调用者无感）。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Enable backup translation")]
+    [Description(
+        "When the primary translation returns a refusal placeholder (e.g. \"Sorry, I can't respond to this question\"), retry that single request with the backup OpenAI settings below.")]
+#endif
+    public bool EnableBackupTranslation { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Backup api key")]
+    [VisibleCondition(nameof(EnableBackupTranslation), ValueCondition.IsEqual, true)]
+#endif
+    public string BackupOpenAiApiKey { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Backup api url")]
+    [Description("Custom OpenAI-compatible api url. (optional)")]
+    [VisibleCondition(nameof(EnableBackupTranslation), ValueCondition.IsEqual, true)]
+#endif
+    public string BackupOpenAiApiUrl { get; set; } = string.Empty;
+
+#if __EMBY__
+    [DisplayName("Backup model")]
+    [Description("Custom OpenAI-compatible api model. (optional)")]
+    [VisibleCondition(nameof(EnableBackupTranslation), ValueCondition.IsEqual, true)]
+#endif
+    public string BackupOpenAiModel { get; set; } = string.Empty;
+
+    // 备用通道使用的 OpenAI 客户端实现，含义与主通道 OpenAiTranslator 相同。
+#if __EMBY__
+    [DisplayName("Backup translator")]
+    [Description(
+        "openai-translator (default) or go-openai. Only go-openai honors the backup extra params and max completion tokens below.")]
+    [VisibleCondition(nameof(EnableBackupTranslation), ValueCondition.IsEqual, true)]
+#endif
+    public OpenAiTranslator BackupOpenAiTranslator { get; set; }
+
+#if __EMBY__
+    [DisplayName("Backup extra params (JSON)")]
+    [Description("Extra JSON fields merged into the chat completion request body (go-openai only).")]
+    [VisibleCondition(nameof(EnableBackupTranslation), ValueCondition.IsEqual, true)]
+#endif
+    public string BackupOpenAiExtraParams { get; set; } = string.Empty;
+
+    // 备用通道单次请求最多生成的 token 数（含思维链）。默认 4096，0 表示使用默认值；仅 go-openai 生效。
+#if __EMBY__
+    [DisplayName("Backup max completion tokens")]
+    [Description("Upper bound of generated tokens per request (including reasoning). Default 4096. go-openai only.")]
+    [VisibleCondition(nameof(EnableBackupTranslation), ValueCondition.IsEqual, true)]
+#endif
+    public int BackupOpenAiMaxCompletionTokens { get; set; } = 4096;
+
+    /// <summary>
+    /// 触发备用翻译的拒答文案列表（原始多行文本，每行一条，忽略空行）。
+    /// 主通道返回的译文里出现**任意一条**（忽略大小写的子串匹配）即视为拒答、转备用通道。
+    /// 留空时使用内置默认文案 <see cref="PluginConfiguration.DefaultBackupRefusalPatterns"/>。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Backup refusal patterns")]
+    [Description(
+        "One refusal placeholder per line. If the translated text contains any of these substrings (case-insensitive), that request is retried via the backup channel. Leave blank to use the built-in default (\"Sorry, I can't respond to this question\").")]
+    [EditMultiline(5)]
+    [VisibleCondition(nameof(EnableBackupTranslation), ValueCondition.IsEqual, true)]
+#endif
+    public string BackupRefusalPatterns { get; set; } = string.Empty;
+
+    /// <summary>解析后的拒答文案列表；空列表表示用内置默认。</summary>
+    public List<string> GetBackupRefusalPatterns()
+    {
+        var list = (BackupRefusalPatterns ?? string.Empty)
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return list;
+    }
+}
+
+/// <summary>评论与元数据刷新：评论抓取、全量刷新、强制回源。</summary>
+public class MetadataOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "Reviews / Refresh";
+#endif
+
+    // 是否要获取评论（只支持FANZA）
+#if __EMBY__
+    [DisplayName("Show Reviews")]
+    [Description("Fetch community reviews from FANZA while scraping.")]
+#endif
+    public bool ReviewSwitch { get; set; } = false;
+
+    /// <summary>
+    /// 评论更新的「全量刷新」开关，默认关闭。
+    ///
+    /// 仅在 <see cref="ReviewSwitch"/> 打开时才生效（<see cref="ReviewSwitch"/> 仍是总开关，
+    /// 刮削与定时任务都读它）：
+    ///   * 关闭（默认）：定时任务只刷新「曾被详情页按钮手动拉取过评论」的番号，
+    ///     这些番号的 Overview 里带有 <c>ReviewAppender.ManualPullMarker</c> 标记；
+    ///   * 打开：恢复原有行为——对所有番号都抓取评论。
+    ///
+    /// 之所以默认关闭：全库抓评论（每条都要翻译）非常慢且烧翻译额度，
+    /// 而绝大多数番号用户并不会去看评论。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Full review refresh")]
+    [Description(
+        "Update task refreshes reviews for all items. When off, only items whose reviews were pulled manually from the detail page are refreshed.")]
+#endif
+    public bool FullReviewRefresh { get; set; } = false;
+
+    /// <summary>
+    /// 打开后，"刷新元数据"（以及补齐任务发现资料缺失时）会携带 update: true，
+    /// 强制服务端回源站重抓，而不是用服务端缓存（lazy=true）。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Enable force refetch")]
+    [Description("Refresh metadata forces the server to refetch from the source site instead of using its cache.")]
+#endif
+    public bool EnableForceRefetch { get; set; } = false;
+}
+
+/// <summary>替换表：标题 / 演员 / 类型的关键字替换。</summary>
+public class SubstitutionOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "Substitution";
+#endif
+
+#if __EMBY__
+    [DisplayName("Enable title substitution")]
+#endif
+    public bool EnableTitleSubstitution { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Title substitution table")]
+    [Description(
+        "One record per line, separated by equal signs. Leave the target substring blank to delete the source substring.")]
+    [EditMultiline(5)]
+#endif
+    public string TitleRawSubstitutionTable
+    {
+        get => _titleSubstitutionTable?.ToString();
+        set => _titleSubstitutionTable = SubstitutionTable.Parse(value);
+    }
+
+    public SubstitutionTable GetTitleSubstitutionTable()
+    {
+        return _titleSubstitutionTable;
+    }
+
+    private SubstitutionTable _titleSubstitutionTable;
+
+#if __EMBY__
+    [DisplayName("Enable actor substitution")]
+#endif
+    public bool EnableActorSubstitution { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Actor substitution table")]
+    [Description(
+        "One record per line, separated by equal signs. Leave the target actor blank to delete the source actor.")]
+    [EditMultiline(5)]
+#endif
+    public string ActorRawSubstitutionTable
+    {
+        get => _actorSubstitutionTable?.ToString();
+        set => _actorSubstitutionTable = SubstitutionTable.Parse(value);
+    }
+
+    public SubstitutionTable GetActorSubstitutionTable()
+    {
+        return _actorSubstitutionTable;
+    }
+
+    private SubstitutionTable _actorSubstitutionTable;
+
+#if __EMBY__
+    [DisplayName("Enable genre substitution")]
+#endif
+    public bool EnableGenreSubstitution { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Genre substitution table")]
+    [Description(
+        "One record per line, separated by equal signs. Leave the target genre blank to delete the source genre.")]
+    [EditMultiline(5)]
+#endif
+    public string GenreRawSubstitutionTable
+    {
+        get => _genreSubstitutionTable?.ToString();
+        set => _genreSubstitutionTable = SubstitutionTable.Parse(value);
+    }
+
+    public SubstitutionTable GetGenreSubstitutionTable()
+    {
+        return _genreSubstitutionTable;
+    }
+
+    private SubstitutionTable _genreSubstitutionTable;
+}
+
+// ===== Merge Multi Versions（多版本合并，自 StrmAssistant 迁移）=====
+
+/// <summary>多版本合并：扫描后按 MetaTube ID 合并同一番号的多个版本。</summary>
+public class MergeOptions
+#if __EMBY__
+    : EditableOptionsBase
+#endif
+{
+#if __EMBY__
+    public override string EditorTitle => "Merge multi versions";
+#endif
+
+    /// <summary>
+    /// 多版本合并总开关。打开后：媒体库扫描完成时自动合并同一番号的多个版本
+    /// （按 MetaTube ProviderId 分组），也可在计划任务里手动运行。
+    /// 从详情页「拆分版本」手动拆开过的条目（Overview 里带
+    /// <see cref="ManualSplitMarker.OverviewMarker"/>）不参与合并。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Merge multi versions")]
+    [Description("Auto merge multiple versions of the same video (same MetaTube id) after library scans. Items manually split from the detail page are excluded. Also available as a scheduled task.")]
+    [Required]
+#endif
+    public bool MergeMultiVersion { get; set; } = false;
+
+#if __EMBY__
+    [DisplayName("Merge movies scope")]
+    [Description("LibraryScope merges versions within the library being scanned; GlobalScope merges across all movie libraries.")]
+    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
+#endif
+    public PluginConfiguration.MergeMoviesScopeOption MergeMoviesPreference { get; set; } =
+        PluginConfiguration.MergeMoviesScopeOption.LibraryScope;
+
+    /// <summary>
+    /// 参与合并的媒体库名单（逗号分隔的库名）。留空 = 所有电影库都参与（默认全选）。
+    /// 只有名单内的库才会被合并任务扫描；名单外即使有同番号多版本也不合并。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Merge libraries")]
+    [Description("Comma-separated movie library names allowed to merge. Leave blank to include all libraries (default).")]
+    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
+#endif
+    public string MergeMoviesLibraryList { get; set; } = string.Empty;
+
+    /// <summary>解析后的库名单；空集合表示不限制（全部库参与）。</summary>
+    public List<string> GetMergeMoviesLibraries()
+    {
+        return (MergeMoviesLibraryList ?? string.Empty)
+            .Split(',')
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 多 CD part 合并开关，默认关闭。
+    ///
+    /// * 关闭（默认）：待合并的番号组里只要任意一个条目存在额外的 CD part（如 -cd1/-cd2 拆分文件），
+    ///   整组都不合并，避免把 part 结构打乱；
+    /// * 打开：允许合并带 CD part 的条目，但要求组内每个番号的 part 数量完全一致
+    ///   （每个条目按 1 + 额外 part 数计），不一致则该组跳过。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("Merge with CD parts")]
+    [Description("Off (default): skip groups where any item has additional CD parts. On: merge items with CD parts, but only when every item has the same part count.")]
+    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
+#endif
+    public bool MergeMultiVersionWithParts { get; set; } = false;
+}

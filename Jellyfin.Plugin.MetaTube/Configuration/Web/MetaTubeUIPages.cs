@@ -1,0 +1,179 @@
+#if __EMBY__
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Emby.Web.GenericEdit;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Events;
+using MediaBrowser.Model.GenericEdit;
+using MediaBrowser.Model.Plugins;
+using MediaBrowser.Model.Plugins.UI;
+using MediaBrowser.Model.Plugins.UI.Views;
+
+namespace Jellyfin.Plugin.MetaTube.Configuration.Web;
+
+/// <summary>
+/// 插件设置页（tab）的视图基类。
+/// Emby 的 Dashboard 会拿 ContentData 走 GenericEdit 反射生成表单，
+/// 所以这里只需要把“某个分组选项对象”交出去，并在保存时写回配置即可。
+/// </summary>
+internal abstract class PluginTabPageView : IPluginPageView, IPluginViewWithOptions
+{
+    protected PluginTabPageView(IEditableObject contentData)
+    {
+        ContentData = contentData;
+    }
+
+    public virtual string Caption => ContentData?.EditorTitle;
+
+    public virtual string SubCaption => ContentData?.EditorDescription;
+
+    public string PluginId => Plugin.Instance.Id.ToString("N");
+
+    public IEditableObject ContentData { get; set; }
+
+    public UserDto User { get; set; }
+
+    public string RedirectViewUrl { get; set; }
+
+    public bool ShowSave { get; set; } = true;
+
+    public bool ShowBack { get; set; }
+
+    public bool AllowSave { get; set; } = true;
+
+    public bool AllowBack { get; set; } = true;
+
+    public PluginViewOptions ViewOptions { get; } = new();
+
+    public event EventHandler<GenericEventArgs<IPluginUIView>> UIViewInfoChanged;
+
+    public virtual bool IsCommandAllowed(string commandKey) => true;
+
+    public virtual Task<IPluginUIView> RunCommand(string itemId, string commandId, string data) =>
+        Task.FromResult<IPluginUIView>(null);
+
+    public abstract Task<IPluginUIView> OnSaveCommand(string itemId, string commandId, string data);
+
+    public virtual Task Cancel() => Task.CompletedTask;
+
+    public virtual void OnDialogResult(IPluginUIView dialogView, bool completedOk, object data)
+    {
+    }
+
+    protected void RaiseUIViewInfoChanged() =>
+        UIViewInfoChanged?.Invoke(this, new GenericEventArgs<IPluginUIView>(this));
+}
+
+/// <summary>
+/// 通用的“一个分组 = 一个 tab 页”视图：ContentData 直接就是分组选项对象，
+/// 保存时把回传的对象写回 <see cref="PluginConfiguration"/> 并落盘。
+/// </summary>
+internal sealed class ConfigurationTabView<TGroup> : PluginTabPageView
+    where TGroup : EditableOptionsBase
+{
+    private readonly Action<PluginConfiguration, TGroup> _setter;
+
+    public ConfigurationTabView(Func<PluginConfiguration, TGroup> getter,
+        Action<PluginConfiguration, TGroup> setter)
+        : base(getter(Plugin.Instance.Configuration))
+    {
+        _setter = setter;
+    }
+
+    public override Task<IPluginUIView> OnSaveCommand(string itemId, string commandId, string data)
+    {
+        if (ContentData is TGroup group)
+        {
+            var configuration = Plugin.Instance.Configuration;
+            _setter(configuration, group);
+            Plugin.Instance.SaveConfiguration(configuration);
+        }
+
+        return Task.FromResult<IPluginUIView>(this);
+    }
+}
+
+/// <summary>
+/// 单个 tab 页的控制器。
+/// </summary>
+internal sealed class PluginTabPageController : IPluginUIPageController
+{
+    private readonly Func<IPluginUIView> _viewFactory;
+
+    public PluginTabPageController(string name, string displayName, Func<IPluginUIView> viewFactory)
+    {
+        _viewFactory = viewFactory;
+        PageInfo = new PluginPageInfo
+        {
+            Name = name,
+            DisplayName = displayName,
+            IsMainConfigPage = false,
+            EnableInMainMenu = false
+        };
+    }
+
+    public PluginPageInfo PageInfo { get; }
+
+    public Task Initialize(CancellationToken token) => Task.CompletedTask;
+
+    public Task<IPluginUIView> CreateDefaultPageView() => Task.FromResult(_viewFactory());
+}
+
+/// <summary>
+/// 设置主页。它本身是第一个 tab（General），并通过 <see cref="IHasTabbedUIPages"/>
+/// 把其余分组注册成 Emby Dashboard 顶部的一排 tab 页。
+/// </summary>
+internal sealed class MetaTubeMainPageController : IPluginUIPageController, IHasTabbedUIPages
+{
+    private readonly List<IPluginUIPageController> _tabPages = new();
+
+    public MetaTubeMainPageController()
+    {
+        // 除了插件卡片的“设置”，再在左侧菜单里给一个固定入口（同 StrmAssistant），
+        // 点进来永远是第一个 tab（General）。
+        PageInfo = new PluginPageInfo
+        {
+            Name = "Settings",
+            DisplayName = "MetaTube",
+            IsMainConfigPage = true,
+            EnableInMainMenu = true,
+            MenuIcon = "video_settings"
+        };
+
+        _tabPages.Add(CreateTab("BadgeImageOptions", "Badge / Image",
+            c => c.BadgeImage, (c, v) => c.BadgeImage = v));
+        _tabPages.Add(CreateTab("ProviderOptions", "Provider / JavDB",
+            c => c.Provider, (c, v) => c.Provider = v));
+        _tabPages.Add(CreateTab("TemplateOptions", "Text template",
+            c => c.Template, (c, v) => c.Template = v));
+        _tabPages.Add(CreateTab("TranslationOptions", "Translation",
+            c => c.Translation, (c, v) => c.Translation = v));
+        _tabPages.Add(CreateTab("BackupTranslationOptions", "Backup translation",
+            c => c.BackupTranslation, (c, v) => c.BackupTranslation = v));
+        _tabPages.Add(CreateTab("MetadataOptions", "Reviews / Refresh",
+            c => c.Metadata, (c, v) => c.Metadata = v));
+        _tabPages.Add(CreateTab("SubstitutionOptions", "Substitution",
+            c => c.Substitution, (c, v) => c.Substitution = v));
+        _tabPages.Add(CreateTab("MergeOptions", "Merge multi versions",
+            c => c.Merge, (c, v) => c.Merge = v));
+    }
+
+    public PluginPageInfo PageInfo { get; }
+
+    public IReadOnlyList<IPluginUIPageController> TabPageControllers => _tabPages.AsReadOnly();
+
+    public Task Initialize(CancellationToken token) => Task.CompletedTask;
+
+    public Task<IPluginUIView> CreateDefaultPageView() =>
+        Task.FromResult<IPluginUIView>(
+            new ConfigurationTabView<GeneralOptions>(c => c.General, (c, v) => c.General = v));
+
+    private static IPluginUIPageController CreateTab<TGroup>(string name, string displayName,
+        Func<PluginConfiguration, TGroup> getter, Action<PluginConfiguration, TGroup> setter)
+        where TGroup : EditableOptionsBase =>
+        new PluginTabPageController(name, displayName,
+            () => new ConfigurationTabView<TGroup>(getter, setter));
+}
+#endif

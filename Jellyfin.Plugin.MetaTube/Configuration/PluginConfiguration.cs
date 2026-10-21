@@ -1,320 +1,492 @@
+using System.ComponentModel;
 using Jellyfin.Plugin.MetaTube.Helpers;
 using Jellyfin.Plugin.MetaTube.Translation;
 #if __EMBY__
-using System.ComponentModel;
 using Emby.Web.GenericEdit;
 using MediaBrowser.Model.Attributes;
-
 #else
 using MediaBrowser.Model.Plugins;
 #endif
 
 namespace Jellyfin.Plugin.MetaTube.Configuration;
 
+// 配置项的真正存放位置已经按用途拆到 PluginOptions.cs 里的各个分组类中，
+// 这里只保留「分组属性」+「同名兼容访问器」。
+//
+// 为什么要保留兼容访问器：插件内部（Providers / ScheduledTasks / ApiClient …）
+// 以及 Jellyfin 端手写的 configPage.html 都按扁平字段名访问配置，
+// 有了这些访问器就不必改动它们；旧配置文件里的扁平字段名也会被
+// 这些访问器自动写回分组对象，无需额外的数据迁移代码。
 #if __EMBY__
 public class PluginConfiguration : EditableOptionsBase
-{
-    public override string EditorTitle => Plugin.Instance.Name;
 #else
 public class PluginConfiguration : BasePluginConfiguration
+#endif
 {
+#if __EMBY__
+    public override string EditorTitle => Plugin.Instance.Name;
+
+    // ---- 分组（Emby 设置页上每个属性 => 一个折叠分组）----
+
+    [DisplayName("General")]
+    [Description("Server address, access token and the basic scraping switches.")]
 #endif
+    public GeneralOptions General
+    {
+        get => _general ??= new GeneralOptions();
+        set
+        {
+            if (value != null) _general = value;
+        }
+    }
+
+    private GeneralOptions _general;
 
 #if __EMBY__
-    [DisplayName("Server")]
-    [Description("Full url of the MetaTube Server, HTTPS protocol is recommended.")]
-    [Required]
+    [DisplayName("Badge / Image")]
+    [Description("Subtitle badges and primary image output.")]
 #endif
-    public string Server { get; set; } = string.Empty;
+    public BadgeImageOptions BadgeImage
+    {
+        get => _badgeImage ??= new BadgeImageOptions();
+        set
+        {
+            if (value != null) _badgeImage = value;
+        }
+    }
+
+    private BadgeImageOptions _badgeImage;
 
 #if __EMBY__
-    [DisplayName("Token")]
-    [Description("Access token for the MetaTube Server, or blank if no token is set by the backend.")]
+    [DisplayName("Provider / JavDB")]
+    [Description("Movie provider filtering and the JavDB session cookie.")]
 #endif
-    public string Token { get; set; } = string.Empty;
+    public ProviderOptions Provider
+    {
+        get => _provider ??= new ProviderOptions();
+        set
+        {
+            if (value != null) _provider = value;
+        }
+    }
+
+    private ProviderOptions _provider;
 
 #if __EMBY__
-    [DisplayName("Enable collections")]
-    [Description("Automatically create collections by series.")]
+    [DisplayName("Text template")]
+    [Description("Name and tagline templates.")]
 #endif
-    public bool EnableCollections { get; set; } = false;
+    public TemplateOptions Template
+    {
+        get => _template ??= new TemplateOptions();
+        set
+        {
+            if (value != null) _template = value;
+        }
+    }
+
+    private TemplateOptions _template;
 
 #if __EMBY__
-    [DisplayName("Enable directors")]
-    [Description("Add directors to corresponding video metadata.")]
+    [DisplayName("Translation")]
+    [Description("Translation mode, engine and the credentials of the selected engine.")]
 #endif
-    public bool EnableDirectors { get; set; } = true;
+    public TranslationOptions Translation
+    {
+        get => _translation ??= new TranslationOptions();
+        set
+        {
+            if (value != null) _translation = value;
+        }
+    }
+
+    private TranslationOptions _translation;
 
 #if __EMBY__
-    [DisplayName("Enable ratings")]
-    [Description("Display community ratings from the original website.")]
+    [DisplayName("Backup translation")]
+    [Description("Retry a single request with a second OpenAI-compatible endpoint when the primary one refuses to answer.")]
 #endif
-    public bool EnableRatings { get; set; } = true;
+    public BackupTranslationOptions BackupTranslation
+    {
+        get => _backupTranslation ??= new BackupTranslationOptions();
+        set
+        {
+            if (value != null) _backupTranslation = value;
+        }
+    }
+
+    private BackupTranslationOptions _backupTranslation;
 
 #if __EMBY__
-    [DisplayName("Enable trailers")]
-    [Description("Generate online video trailers in strm format.")]
+    [DisplayName("Reviews / Refresh")]
+    [Description("Review fetching and metadata refresh behaviour.")]
 #endif
-    public bool EnableTrailers { get; set; } = false;
+    public MetadataOptions Metadata
+    {
+        get => _metadata ??= new MetadataOptions();
+        set
+        {
+            if (value != null) _metadata = value;
+        }
+    }
+
+    private MetadataOptions _metadata;
 
 #if __EMBY__
-    [DisplayName("Enable real actor names")]
-    [Description("Search and replace with real actor names from AVBASE.")]
+    [DisplayName("Substitution")]
+    [Description("Keyword substitution tables for title / actor / genre.")]
 #endif
-    public bool EnableRealActorNames { get; set; } = false;
+    public SubstitutionOptions Substitution
+    {
+        get => _substitution ??= new SubstitutionOptions();
+        set
+        {
+            if (value != null) _substitution = value;
+        }
+    }
+
+    private SubstitutionOptions _substitution;
 
 #if __EMBY__
-    [DisplayName("Enable badges")]
-    [Description("Add Chinese subtitle badges to primary images.")]
+    [DisplayName("Merge multi versions")]
+    [Description("Merge multiple versions of the same video after library scans.")]
 #endif
-    public bool EnableBadges { get; set; } = false;
+    public MergeOptions Merge
+    {
+        get => _merge ??= new MergeOptions();
+        set
+        {
+            if (value != null) _merge = value;
+        }
+    }
 
-#if __EMBY__
-    [DisplayName("Badge url")]
-    [Description("Custom badge url, PNG format is recommended. (default: zimu.png)")]
-#endif
-    public string BadgeUrl { get; set; } = "zimu.png";
+    private MergeOptions _merge;
 
-#if __EMBY__
-    [DisplayName("Primary image ratio")]
-    [Description("Aspect ratio for primary images, set a negative value to use the default.")]
-#endif
-    public double PrimaryImageRatio { get; set; } = -1;
+    // ============================================================
+    // 兼容访问器：字段名与旧版完全一致，读写都落到上面的分组对象。
+    // [Browsable(false)] 让它们不出现在 Emby 设置页里（否则每个字段会重复显示两次）。
+    // ============================================================
 
-#if __EMBY__
-    [DisplayName("Default image quality")]
-    [Description("Default compression quality for JPEG images, set between 0 and 100. (default: 90)")]
-    [MinValue(0)]
-    [MaxValue(100)]
-    [Required]
-#endif
-    public int DefaultImageQuality { get; set; } = 90;
+    [Browsable(false)]
+    public string Server
+    {
+        get => General.Server;
+        set => General.Server = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Enable movie provider filter")]
-    [Description("Filter and reorder search results from movie providers.")]
-#endif
-    public bool EnableMovieProviderFilter { get; set; } = false;
+    [Browsable(false)]
+    public string Token
+    {
+        get => General.Token;
+        set => General.Token = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Movie provider filter")]
-    [Description(
-        "Provider names are case-insensitive, with decreasing precedence from left to right, separated by commas.")]
-#endif
+    [Browsable(false)]
+    public bool EnableCollections
+    {
+        get => General.EnableCollections;
+        set => General.EnableCollections = value;
+    }
+
+    [Browsable(false)]
+    public bool EnableDirectors
+    {
+        get => General.EnableDirectors;
+        set => General.EnableDirectors = value;
+    }
+
+    [Browsable(false)]
+    public bool EnableRatings
+    {
+        get => General.EnableRatings;
+        set => General.EnableRatings = value;
+    }
+
+    [Browsable(false)]
+    public bool EnableTrailers
+    {
+        get => General.EnableTrailers;
+        set => General.EnableTrailers = value;
+    }
+
+    [Browsable(false)]
+    public bool EnableRealActorNames
+    {
+        get => General.EnableRealActorNames;
+        set => General.EnableRealActorNames = value;
+    }
+
+    [Browsable(false)]
+    public bool EnableBadges
+    {
+        get => BadgeImage.EnableBadges;
+        set => BadgeImage.EnableBadges = value;
+    }
+
+    [Browsable(false)]
+    public string BadgeUrl
+    {
+        get => BadgeImage.BadgeUrl;
+        set => BadgeImage.BadgeUrl = value;
+    }
+
+    [Browsable(false)]
+    public double PrimaryImageRatio
+    {
+        get => BadgeImage.PrimaryImageRatio;
+        set => BadgeImage.PrimaryImageRatio = value;
+    }
+
+    [Browsable(false)]
+    public int DefaultImageQuality
+    {
+        get => BadgeImage.DefaultImageQuality;
+        set => BadgeImage.DefaultImageQuality = value;
+    }
+
+    [Browsable(false)]
+    public bool EnableMovieProviderFilter
+    {
+        get => Provider.EnableMovieProviderFilter;
+        set => Provider.EnableMovieProviderFilter = value;
+    }
+
+    [Browsable(false)]
     public string RawMovieProviderFilter
     {
-        get => _movieProviderFilter?.Any() == true ? string.Join(',', _movieProviderFilter) : string.Empty;
-        set => _movieProviderFilter = value?.Split(',').Select(s => s.Trim()).Where(s => s.Any())
-            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        get => Provider.RawMovieProviderFilter;
+        set => Provider.RawMovieProviderFilter = value;
     }
 
     public List<string> GetMovieProviderFilter()
     {
-        return _movieProviderFilter;
+        return Provider.GetMovieProviderFilter();
     }
 
-    private List<string> _movieProviderFilter;
+    [Browsable(false)]
+    public string JavdbCookie
+    {
+        get => Provider.JavdbCookie;
+        set => Provider.JavdbCookie = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Enable template")]
-#endif
-    public bool EnableTemplate { get; set; } = false;
+    /// <summary>解析后的 JavDB cookie；空白返回空字符串。</summary>
+    public string GetJavdbCookie()
+    {
+        return Provider.GetJavdbCookie();
+    }
 
-#if __EMBY__
-    [DisplayName("Name template")]
-#endif
-    public string NameTemplate { get; set; } = DefaultNameTemplate;
+    [Browsable(false)]
+    public bool EnableTemplate
+    {
+        get => Template.EnableTemplate;
+        set => Template.EnableTemplate = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Tagline template")]
-#endif
-    public string TaglineTemplate { get; set; } = DefaultTaglineTemplate;
+    [Browsable(false)]
+    public string NameTemplate
+    {
+        get => Template.NameTemplate;
+        set => Template.NameTemplate = value;
+    }
+
+    [Browsable(false)]
+    public string TaglineTemplate
+    {
+        get => Template.TaglineTemplate;
+        set => Template.TaglineTemplate = value;
+    }
 
     public static string DefaultNameTemplate => "{number} {title}";
 
     public static string DefaultTaglineTemplate => "配信開始日 {date}";
 
-#if __EMBY__
-    [DisplayName("Translation mode")]
-#endif
-    public TranslationMode TranslationMode { get; set; } = TranslationMode.Disabled;
-
-#if __EMBY__
-    [DisplayName("Translation engine")]
-#endif
-    public TranslationEngine TranslationEngine { get; set; } = TranslationEngine.Baidu;
-
-#if __EMBY__
-    [DisplayName("Baidu app id")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.Baidu)]
-#endif
-    public string BaiduAppId { get; set; } = string.Empty;
-
-#if __EMBY__
-    [DisplayName("Baidu app key")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.Baidu)]
-#endif
-    public string BaiduAppKey { get; set; } = string.Empty;
-
-#if __EMBY__
-    [DisplayName("Google api key")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.Google)]
-#endif
-    public string GoogleApiKey { get; set; } = string.Empty;
-
-#if __EMBY__
-    [DisplayName("Google api url")]
-    [Description("Custom Google translate api url. (optional)")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.Google)]
-#endif
-    public string GoogleApiUrl { get; set; } = string.Empty;
-
-#if __EMBY__
-    [DisplayName("DeepL api key")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.DeepL)]
-#endif
-    public string DeepLApiKey { get; set; } = string.Empty;
-
-#if __EMBY__
-    [DisplayName("DeepL api url")]
-    [Description("Custom DeepL-compatible api url. (optional)")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.DeepL)]
-#endif
-    public string DeepLApiUrl { get; set; } = string.Empty;
-
-#if __EMBY__
-    [DisplayName("OpenAI api key")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
-#endif
-    public string OpenAiApiKey { get; set; } = string.Empty;
-
-#if __EMBY__
-    [DisplayName("OpenAI api url")]
-    [Description("Custom OpenAI-compatible api url. (optional)")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
-#endif
-    public string OpenAiApiUrl { get; set; } = string.Empty;
-
-#if __EMBY__
-    [DisplayName("OpenAI model")]
-    [Description("Custom OpenAI-compatible api model. (optional)")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
-#endif
-    public string OpenAiModel { get; set; } = string.Empty;
-
-    // 翻译时使用的 OpenAI 客户端实现。默认（第一个枚举值）是 openai-translator，
-    // 保持历史行为；只有 go-openai 才会应用下面的额外参数与最大 token 配置。
-#if __EMBY__
-    [DisplayName("OpenAI translator")]
-    [Description(
-        "openai-translator (default) or go-openai. Only go-openai honors the extra params and max completion tokens below.")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
-#endif
-    public OpenAiTranslator OpenAiTranslator { get; set; }
-
-#if __EMBY__
-    [DisplayName("OpenAI extra params (JSON)")]
-    [Description("Extra JSON fields merged into the chat completion request body (go-openai only). To cut cost/latency on SiliconFlow reasoning models use {\"thinking_budget\": 1} (verified: reasoning tokens 1154 -> 2, 13s -> 1.3s). Other gateways differ, e.g. Zhipu {\"thinking\": {\"type\": \"disabled\"}}, vLLM {\"chat_template_kwargs\": {\"enable_thinking\": false}}.")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
-#endif
-    public string OpenAiExtraParams { get; set; } = string.Empty;
-
-    // 单次请求最多生成的 token 数（含思维链）。默认 4096，0 表示使用默认值；仅 go-openai 生效。
-#if __EMBY__
-    [DisplayName("OpenAI max completion tokens")]
-    [Description("Upper bound of generated tokens per request (including reasoning). Default 4096. go-openai only.")]
-    [VisibleCondition(nameof(TranslationEngine), ValueCondition.IsEqual, TranslationEngine.OpenAi)]
-#endif
-    public int OpenAiMaxCompletionTokens { get; set; } = 4096;
-
-#if __EMBY__
-    [DisplayName("JavDB cookie")]
-    [Description(
-        "JavDB 会话 cookie（如 _jdb_session=...），用于访问需要登录的条目（如 FC2 素人番号）。" +
-        "从浏览器登录 JavDB 后，在开发者工具(F12) → Network 里复制请求的 Cookie 头整个填入即可。留空则不携带。")]
-#endif
-    public string JavdbCookie { get; set; } = string.Empty;
-
-    /// <summary>解析后的 JavDB cookie；空白返回空字符串。</summary>
-    public string GetJavdbCookie()
+    [Browsable(false)]
+    public TranslationMode TranslationMode
     {
-        return JavdbCookie?.Trim() ?? string.Empty;
+        get => Translation.Mode;
+        set => Translation.Mode = value;
     }
 
-    /// <summary>
-    /// 备用翻译开关。部分中转站偶尔对某条文本返回
-    /// 「Sorry, I can't respond to this question」之类的拒答文案而不给译文；
-    /// 打开后，检测到该文案的那一次请求会改用下面的备用 OpenAI 参数重试（请求粒度切换，
-    /// 对上层调用者无感）。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("Enable backup translation")]
-    [Description(
-        "When the primary translation returns a refusal placeholder (e.g. \"Sorry, I can't respond to this question\"), retry that single request with the backup OpenAI settings below.")]
-#endif
-    public bool EnableBackupTranslation { get; set; } = false;
+    [Browsable(false)]
+    public TranslationEngine TranslationEngine
+    {
+        get => Translation.Engine;
+        set => Translation.Engine = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Backup api key")]
-#endif
-    public string BackupOpenAiApiKey { get; set; } = string.Empty;
+    [Browsable(false)]
+    public string BaiduAppId
+    {
+        get => Translation.BaiduAppId;
+        set => Translation.BaiduAppId = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Backup api url")]
-    [Description("Custom OpenAI-compatible api url. (optional)")]
-#endif
-    public string BackupOpenAiApiUrl { get; set; } = string.Empty;
+    [Browsable(false)]
+    public string BaiduAppKey
+    {
+        get => Translation.BaiduAppKey;
+        set => Translation.BaiduAppKey = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Backup model")]
-    [Description("Custom OpenAI-compatible api model. (optional)")]
-#endif
-    public string BackupOpenAiModel { get; set; } = string.Empty;
+    [Browsable(false)]
+    public string GoogleApiKey
+    {
+        get => Translation.GoogleApiKey;
+        set => Translation.GoogleApiKey = value;
+    }
 
-    // 备用通道使用的 OpenAI 客户端实现，含义与主通道 OpenAiTranslator 相同。
-#if __EMBY__
-    [DisplayName("Backup translator")]
-    [Description(
-        "openai-translator (default) or go-openai. Only go-openai honors the backup extra params and max completion tokens below.")]
-#endif
-    public OpenAiTranslator BackupOpenAiTranslator { get; set; }
+    [Browsable(false)]
+    public string GoogleApiUrl
+    {
+        get => Translation.GoogleApiUrl;
+        set => Translation.GoogleApiUrl = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Backup extra params (JSON)")]
-    [Description("Extra JSON fields merged into the chat completion request body (go-openai only).")]
-#endif
-    public string BackupOpenAiExtraParams { get; set; } = string.Empty;
+    [Browsable(false)]
+    public string DeepLApiKey
+    {
+        get => Translation.DeepLApiKey;
+        set => Translation.DeepLApiKey = value;
+    }
 
-    // 备用通道单次请求最多生成的 token 数（含思维链）。默认 4096，0 表示使用默认值；仅 go-openai 生效。
-#if __EMBY__
-    [DisplayName("Backup max completion tokens")]
-    [Description("Upper bound of generated tokens per request (including reasoning). Default 4096. go-openai only.")]
-#endif
-    public int BackupOpenAiMaxCompletionTokens { get; set; } = 4096;
+    [Browsable(false)]
+    public string DeepLApiUrl
+    {
+        get => Translation.DeepLApiUrl;
+        set => Translation.DeepLApiUrl = value;
+    }
 
-    /// <summary>
-    /// 触发备用翻译的拒答文案列表（原始多行文本，每行一条，忽略空行）。
-    /// 主通道返回的译文里出现**任意一条**（忽略大小写的子串匹配）即视为拒答、转备用通道。
-    /// 留空时使用内置默认文案 <see cref="DefaultBackupRefusalPatterns"/>。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("Backup refusal patterns")]
-    [Description(
-        "One refusal placeholder per line. If the translated text contains any of these substrings (case-insensitive), that request is retried via the backup channel. Leave blank to use the built-in default (\"Sorry, I can't respond to this question\").")]
-    [EditMultiline(5)]
-#endif
-    public string BackupRefusalPatterns { get; set; } = string.Empty;
+    [Browsable(false)]
+    public string OpenAiApiKey
+    {
+        get => Translation.OpenAiApiKey;
+        set => Translation.OpenAiApiKey = value;
+    }
+
+    [Browsable(false)]
+    public string OpenAiApiUrl
+    {
+        get => Translation.OpenAiApiUrl;
+        set => Translation.OpenAiApiUrl = value;
+    }
+
+    [Browsable(false)]
+    public string OpenAiModel
+    {
+        get => Translation.OpenAiModel;
+        set => Translation.OpenAiModel = value;
+    }
+
+    [Browsable(false)]
+    public OpenAiTranslator OpenAiTranslator
+    {
+        get => Translation.OpenAiTranslator;
+        set => Translation.OpenAiTranslator = value;
+    }
+
+    [Browsable(false)]
+    public string OpenAiExtraParams
+    {
+        get => Translation.OpenAiExtraParams;
+        set => Translation.OpenAiExtraParams = value;
+    }
+
+    [Browsable(false)]
+    public int OpenAiMaxCompletionTokens
+    {
+        get => Translation.OpenAiMaxCompletionTokens;
+        set => Translation.OpenAiMaxCompletionTokens = value;
+    }
+
+    [Browsable(false)]
+    public int MaxChunkSize
+    {
+        get => Translation.MaxChunkSize;
+        set => Translation.MaxChunkSize = value;
+    }
+
+    [Browsable(false)]
+    public int MaxTranslationConcurrency
+    {
+        get => Translation.MaxTranslationConcurrency;
+        set => Translation.MaxTranslationConcurrency = value;
+    }
+
+    [Browsable(false)]
+    public int RequestTimeoutSeconds
+    {
+        get => Translation.RequestTimeoutSeconds;
+        set => Translation.RequestTimeoutSeconds = value;
+    }
+
+    [Browsable(false)]
+    public bool EnableCheck
+    {
+        get => Translation.EnableCheck;
+        set => Translation.EnableCheck = value;
+    }
+
+    [Browsable(false)]
+    public bool EnableBackupTranslation
+    {
+        get => BackupTranslation.EnableBackupTranslation;
+        set => BackupTranslation.EnableBackupTranslation = value;
+    }
+
+    [Browsable(false)]
+    public string BackupOpenAiApiKey
+    {
+        get => BackupTranslation.BackupOpenAiApiKey;
+        set => BackupTranslation.BackupOpenAiApiKey = value;
+    }
+
+    [Browsable(false)]
+    public string BackupOpenAiApiUrl
+    {
+        get => BackupTranslation.BackupOpenAiApiUrl;
+        set => BackupTranslation.BackupOpenAiApiUrl = value;
+    }
+
+    [Browsable(false)]
+    public string BackupOpenAiModel
+    {
+        get => BackupTranslation.BackupOpenAiModel;
+        set => BackupTranslation.BackupOpenAiModel = value;
+    }
+
+    [Browsable(false)]
+    public OpenAiTranslator BackupOpenAiTranslator
+    {
+        get => BackupTranslation.BackupOpenAiTranslator;
+        set => BackupTranslation.BackupOpenAiTranslator = value;
+    }
+
+    [Browsable(false)]
+    public string BackupOpenAiExtraParams
+    {
+        get => BackupTranslation.BackupOpenAiExtraParams;
+        set => BackupTranslation.BackupOpenAiExtraParams = value;
+    }
+
+    [Browsable(false)]
+    public int BackupOpenAiMaxCompletionTokens
+    {
+        get => BackupTranslation.BackupOpenAiMaxCompletionTokens;
+        set => BackupTranslation.BackupOpenAiMaxCompletionTokens = value;
+    }
+
+    [Browsable(false)]
+    public string BackupRefusalPatterns
+    {
+        get => BackupTranslation.BackupRefusalPatterns;
+        set => BackupTranslation.BackupRefusalPatterns = value;
+    }
 
     /// <summary>解析后的拒答文案列表；空列表表示用内置默认。</summary>
     public List<string> GetBackupRefusalPatterns()
     {
-        var list = (BackupRefusalPatterns ?? string.Empty)
-            .Split('\n')
-            .Select(line => line.Trim())
-            .Where(line => line.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        return list;
+        return BackupTranslation.GetBackupRefusalPatterns();
     }
 
     /// <summary>未配置时的内置默认拒答文案。</summary>
@@ -323,152 +495,90 @@ public class PluginConfiguration : BasePluginConfiguration
         "Sorry, I can't respond to this question"
     };
 
-    // 翻译时最大传输的文字个数，避免一次性传太多需要AI翻译很久
-#if __EMBY__
-    [DisplayName("Translation MaxChunkSize")]
-#endif
-    public int MaxChunkSize { get; set; } = 2000;
+    [Browsable(false)]
+    public bool ReviewSwitch
+    {
+        get => Metadata.ReviewSwitch;
+        set => Metadata.ReviewSwitch = value;
+    }
 
-    /// <summary>
-    /// 翻译时同时发起的请求数上限（旧版本写死为 5）。
-    ///
-    /// 调大能缩短多分片评论的整体耗时（整体耗时由最慢的一片决定），
-    /// 但会同时压到翻译服务的速率限制；调小则更稳。
-    /// 改动后**无需重启**，下一次翻译请求就会按新值限流。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("Translation concurrency")]
-    [Description(
-        "Max concurrent translation requests. Default 5. Takes effect without restart. Higher is faster but may hit provider rate limits.")]
-    [MinValue(1)]
-    [MaxValue(32)]
-#endif
-    public int MaxTranslationConcurrency { get; set; } = 5;
+    [Browsable(false)]
+    public bool FullReviewRefresh
+    {
+        get => Metadata.FullReviewRefresh;
+        set => Metadata.FullReviewRefresh = value;
+    }
 
-    /// <summary>
-    /// 单次请求 MetaTube 服务端的超时时间（秒），默认 600（10 分钟）。
-    ///
-    /// 调用的主要是翻译接口，而翻译走大模型：单次摘要/评论分片在推理模型上
-    /// 可能要几十秒到数分钟。HttpClient 默认 100 秒会导致请求被中途取消而整段翻译失败。
-    /// 改动后**无需重启**，下一次请求就按新值计时。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("API request timeout")]
-    [Description(
-        "Timeout in seconds for a single MetaTube server request. Default 600. Translation runs on an LLM and can take minutes.")]
-    [MinValue(1)]
-    [MaxValue(7200)]
-#endif
-    public int RequestTimeoutSeconds { get; set; } = 600;
-    
-    // 标题已经包含中文时，认为已经翻译过了
-#if __EMBY__
-    [DisplayName("Translation EnableCheck")]
-#endif
-    public bool EnableCheck { get; set; } = false;
-    
-    // 是否要获取评论（只支持FANZA）
-#if __EMBY__
-    [DisplayName("Show Reviews")]
-#endif
-    public bool ReviewSwitch { get; set; } = false;
+    [Browsable(false)]
+    public bool EnableForceRefetch
+    {
+        get => Metadata.EnableForceRefetch;
+        set => Metadata.EnableForceRefetch = value;
+    }
 
-    /// <summary>
-    /// 评论更新的「全量刷新」开关，默认关闭。
-    ///
-    /// 仅在 <see cref="ReviewSwitch"/> 打开时才生效（<see cref="ReviewSwitch"/> 仍是总开关，
-    /// 刮削与定时任务都读它）：
-    ///   * 关闭（默认）：定时任务只刷新「曾被详情页按钮手动拉取过评论」的番号，
-    ///     这些番号的 Overview 里带有 <c>ReviewAppender.ManualPullMarker</c> 标记；
-    ///   * 打开：恢复原有行为——对所有番号都抓取评论。
-    ///
-    /// 之所以默认关闭：全库抓评论（每条都要翻译）非常慢且烧翻译额度，
-    /// 而绝大多数番号用户并不会去看评论。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("Full review refresh")]
-    [Description(
-        "Update task refreshes reviews for all items. When off, only items whose reviews were pulled manually from the detail page are refreshed.")]
-#endif
-    public bool FullReviewRefresh { get; set; } = false;
+    [Browsable(false)]
+    public bool EnableTitleSubstitution
+    {
+        get => Substitution.EnableTitleSubstitution;
+        set => Substitution.EnableTitleSubstitution = value;
+    }
 
-    /// <summary>
-    /// 打开后，"刷新元数据"（以及补齐任务发现资料缺失时）会携带 update: true，
-    /// 强制服务端回源站重抓，而不是用服务端缓存（lazy=true）。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("Enable force refetch")]
-    [Description("Refresh metadata forces the server to refetch from the source site instead of using its cache.")]
-#endif
-    public bool EnableForceRefetch { get; set; } = false;
-    
-#if __EMBY__
-    [DisplayName("Enable title substitution")]
-#endif
-    public bool EnableTitleSubstitution { get; set; } = false;
-
-#if __EMBY__
-    [DisplayName("Title substitution table")]
-    [Description(
-        "One record per line, separated by equal signs. Leave the target substring blank to delete the source substring.")]
-    [EditMultiline(5)]
-#endif
+    [Browsable(false)]
     public string TitleRawSubstitutionTable
     {
-        get => _titleSubstitutionTable?.ToString();
-        set => _titleSubstitutionTable = SubstitutionTable.Parse(value);
+        get => Substitution.TitleRawSubstitutionTable;
+        set => Substitution.TitleRawSubstitutionTable = value;
     }
 
     public SubstitutionTable GetTitleSubstitutionTable()
     {
-        return _titleSubstitutionTable;
+        return Substitution.GetTitleSubstitutionTable();
     }
 
-    private SubstitutionTable _titleSubstitutionTable;
+    [Browsable(false)]
+    public bool EnableActorSubstitution
+    {
+        get => Substitution.EnableActorSubstitution;
+        set => Substitution.EnableActorSubstitution = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Enable actor substitution")]
-#endif
-    public bool EnableActorSubstitution { get; set; } = false;
-
-#if __EMBY__
-    [DisplayName("Actor substitution table")]
-    [Description(
-        "One record per line, separated by equal signs. Leave the target actor blank to delete the source actor.")]
-    [EditMultiline(5)]
-#endif
+    [Browsable(false)]
     public string ActorRawSubstitutionTable
     {
-        get => _actorSubstitutionTable?.ToString();
-        set => _actorSubstitutionTable = SubstitutionTable.Parse(value);
+        get => Substitution.ActorRawSubstitutionTable;
+        set => Substitution.ActorRawSubstitutionTable = value;
     }
 
     public SubstitutionTable GetActorSubstitutionTable()
     {
-        return _actorSubstitutionTable;
+        return Substitution.GetActorSubstitutionTable();
     }
 
-    private SubstitutionTable _actorSubstitutionTable;
+    [Browsable(false)]
+    public bool EnableGenreSubstitution
+    {
+        get => Substitution.EnableGenreSubstitution;
+        set => Substitution.EnableGenreSubstitution = value;
+    }
 
-#if __EMBY__
-    [DisplayName("Enable genre substitution")]
-#endif
-    public bool EnableGenreSubstitution { get; set; } = false;
+    [Browsable(false)]
+    public string GenreRawSubstitutionTable
+    {
+        get => Substitution.GenreRawSubstitutionTable;
+        set => Substitution.GenreRawSubstitutionTable = value;
+    }
 
-    // ===== Merge Multi Versions（多版本合并，自 StrmAssistant 迁移）=====
+    public SubstitutionTable GetGenreSubstitutionTable()
+    {
+        return Substitution.GetGenreSubstitutionTable();
+    }
 
-    /// <summary>
-    /// 多版本合并总开关。打开后：媒体库扫描完成时自动合并同一番号的多个版本
-    /// （按 MetaTube ProviderId 分组），也可在计划任务里手动运行。
-    /// 从详情页「拆分版本」手动拆开过的条目（Overview 里带
-    /// <see cref="ManualSplitMarker.OverviewMarker"/>）不参与合并。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("Merge multi versions")]
-    [Description("Auto merge multiple versions of the same video (same MetaTube id) after library scans. Items manually split from the detail page are excluded. Also available as a scheduled task.")]
-    [Required]
-#endif
-    public bool MergeMultiVersion { get; set; } = false;
+    [Browsable(false)]
+    public bool MergeMultiVersion
+    {
+        get => Merge.MergeMultiVersion;
+        set => Merge.MergeMultiVersion = value;
+    }
 
     /// <summary>合并范围枚举：仅当前扫描的库，或全局所有电影库。</summary>
     public enum MergeMoviesScopeOption
@@ -477,66 +587,30 @@ public class PluginConfiguration : BasePluginConfiguration
         GlobalScope
     }
 
-#if __EMBY__
-    [DisplayName("Merge movies scope")]
-    [Description("LibraryScope merges versions within the library being scanned; GlobalScope merges across all movie libraries.")]
-    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
-#endif
-    public MergeMoviesScopeOption MergeMoviesPreference { get; set; } = MergeMoviesScopeOption.LibraryScope;
+    [Browsable(false)]
+    public MergeMoviesScopeOption MergeMoviesPreference
+    {
+        get => Merge.MergeMoviesPreference;
+        set => Merge.MergeMoviesPreference = value;
+    }
 
-    /// <summary>
-    /// 参与合并的媒体库名单（逗号分隔的库名）。留空 = 所有电影库都参与（默认全选）。
-    /// 只有名单内的库才会被合并任务扫描；名单外即使有同番号多版本也不合并。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("Merge libraries")]
-    [Description("Comma-separated movie library names allowed to merge. Leave blank to include all libraries (default).")]
-    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
-#endif
-    public string MergeMoviesLibraryList { get; set; } = string.Empty;
+    [Browsable(false)]
+    public string MergeMoviesLibraryList
+    {
+        get => Merge.MergeMoviesLibraryList;
+        set => Merge.MergeMoviesLibraryList = value;
+    }
 
     /// <summary>解析后的库名单；空集合表示不限制（全部库参与）。</summary>
     public List<string> GetMergeMoviesLibraries()
     {
-        return (MergeMoviesLibraryList ?? string.Empty)
-            .Split(',')
-            .Select(s => s.Trim())
-            .Where(s => s.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        return Merge.GetMergeMoviesLibraries();
     }
 
-    /// <summary>
-    /// 多 CD part 合并开关，默认关闭。
-    ///
-    /// * 关闭（默认）：待合并的番号组里只要任意一个条目存在额外的 CD part（如 -cd1/-cd2 拆分文件），
-    ///   整组都不合并，避免把 part 结构打乱；
-    /// * 打开：允许合并带 CD part 的条目，但要求组内每个番号的 part 数量完全一致
-    ///   （每个条目按 1 + 额外 part 数计），不一致则该组跳过。
-    /// </summary>
-#if __EMBY__
-    [DisplayName("Merge with CD parts")]
-    [Description("Off (default): skip groups where any item has additional CD parts. On: merge items with CD parts, but only when every item has the same part count.")]
-    [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
-#endif
-    public bool MergeMultiVersionWithParts { get; set; } = false;
-
-#if __EMBY__
-    [DisplayName("Genre substitution table")]
-    [Description(
-        "One record per line, separated by equal signs. Leave the target genre blank to delete the source genre.")]
-    [EditMultiline(5)]
-#endif
-    public string GenreRawSubstitutionTable
+    [Browsable(false)]
+    public bool MergeMultiVersionWithParts
     {
-        get => _genreSubstitutionTable?.ToString();
-        set => _genreSubstitutionTable = SubstitutionTable.Parse(value);
+        get => Merge.MergeMultiVersionWithParts;
+        set => Merge.MergeMultiVersionWithParts = value;
     }
-
-    public SubstitutionTable GetGenreSubstitutionTable()
-    {
-        return _genreSubstitutionTable;
-    }
-
-    private SubstitutionTable _genreSubstitutionTable;
 }

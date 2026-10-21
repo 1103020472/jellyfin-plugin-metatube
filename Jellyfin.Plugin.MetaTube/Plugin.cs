@@ -1,10 +1,12 @@
 using Jellyfin.Plugin.MetaTube.Configuration;
 using MediaBrowser.Common.Plugins;
 #if __EMBY__
+using Jellyfin.Plugin.MetaTube.Configuration.Web;
 using MediaBrowser.Common;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Logging;
+using MediaBrowser.Model.Plugins.UI;
 
 #else
 using MediaBrowser.Model.Plugins;
@@ -15,9 +17,16 @@ using MediaBrowser.Common.Configuration;
 namespace Jellyfin.Plugin.MetaTube;
 
 #if __EMBY__
-public class Plugin : BasePluginSimpleUI<PluginConfiguration>, IHasThumbImage
+public class Plugin : BasePluginSimpleUI<PluginConfiguration>, IHasThumbImage, IHasUIPages
 {
     public readonly ILogger logger;
+
+    /// <summary>
+    /// 设置页控制器（第一次访问时创建）。
+    /// 重新实现 <see cref="IHasUIPages"/> 是为了用我们自己的“多 tab”页面
+    /// 取代 BasePluginSimpleUI 默认的单页平铺设置页。
+    /// </summary>
+    private IReadOnlyCollection<IPluginUIPageController> uiPageControllers;
 
     /// <summary>
     /// 应用宿主。自定义 API 服务（Api/ReviewService）需要通过它解析
@@ -65,6 +74,17 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
 #if __EMBY__
     public PluginConfiguration Configuration => GetOptions();
+
+    /// <summary>
+    /// Emby Dashboard 的设置页（首个 tab + 其余 tab 由 MetaTubeMainPageController 提供）。
+    /// </summary>
+    IReadOnlyCollection<IPluginUIPageController> IHasUIPages.UIPageControllers =>
+        uiPageControllers ??= new IPluginUIPageController[] {new MetaTubeMainPageController()};
+
+    /// <summary>
+    /// 保存配置（供 tab 页视图调用）。
+    /// </summary>
+    internal void SaveConfiguration(PluginConfiguration configuration) => SaveOptions(configuration);
 
     public Stream GetThumbImage()
     {
