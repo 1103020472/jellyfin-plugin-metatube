@@ -1,3 +1,27 @@
+/* ============================================================================
+ * emby-swiper-trailer.js  —— 首页轮播图（Emby 4.9 Web / 安卓 app WebView）
+ * v3 修复（app 端偶发不显示轮播图、退回原生首页）：
+ *  1. 常驻心跳 heartbeat（1s 一次）：只要首页视图在 DOM 里且没有 banner，就自己补挂。
+ *     不再依赖任何客户端事件，app 不派发 viewbeforeshow/viewshow 也照样能挂上。
+ *  2. 心跳还负责自愈：banner 的 DOM 在但 Swiper 实例丢了 -> 重挂；
+ *     banner 高度连续 3 次为 0（样式丢失 / 初始化时容器没尺寸）-> 先 update，再重挂（最多 3 次）。
+ *  3. 挂载失败指数退避（0.5s -> 10s），媒体库为空长退避 5 分钟，不再每秒打接口。
+ *  4. 失败快照 failInfo：只被下一次失败覆盖，成功不会抹掉，app 翻车后可以事后取回现场。
+ *  5. 事件（viewbeforeshow / viewshow / pageshow / visibilitychange）只用来快跑，
+ *     全部 trace 记录，方便从日志判断客户端到底派发了什么。
+ *  6. isRestored（返回首页复用视图）分支全部加空判断，swiper 实例丢了就重新挂载。
+ *  7. 存储读写、图片宽度探测、Swiper 回调全做异常保护，QuotaExceededError 不再让首页白给。
+ *  8. 手机/WebView 下收紧图片探测预算（6 张/批、单张 1.5s、阈值 1000px、最多探 24 张）。
+ *  9. 冷启动先渲染缓存、跨天在后台刷新，不再阻塞挂载。
+ * 10. 诊断（默认已关闭）：start() 里的 DEBUG_BADGE / DIAG_TO_SERVER 现在都是 false —— 不打 console、
+ *     不写服务端、不弹右下角提示；日志只在本机内存缓冲里滚（120 行），失败快照存 localStorage。
+ *     排查时把这两个改回 true，重现一次即可取回现场（含 failAt/failReason/failLog）。
+ * 11. 修复（v3 引入的交互 bug）：分页条 / 上下按钮的元素改用 pickNavEl() 取“本 swiper 的直接子元素”。
+ *     原来写成 mainEl.querySelector(".swiper-pagination")，而子 swiper 的标记插在
+ *     .mySwiper-main > .swiper-wrapper 里，文档顺序更靠前，于是主 swiper 抢到了第 1 个媒体库的分页条：
+ *     第 1 个库的圆点被灌成 11 个（媒体库数量）、被加上 swiper-pagination-horizontal 类
+ *     → 命中自定义 CSS 的 left 规则跑到左边、撑成整屏可点覆盖层 → 该库无法手动下滑切封面。
+ * ========================================================================== */
 class CommonUtils {
     static loadExtastyle(content, id) {
         let style = document.createElement("style");
@@ -17,6 +41,29 @@ class HomeSwiper {
         this.showItemNum = 9;
         this.loadFlag = false;//是否已经加载
         this.flag_cssjs = true;//是否是cssjs插件加载，修复cssjs插件加载首次可能不运行的问题
+        this.mounting = false;//是否正在挂载，防止并发重复挂载
+        this.nudgeTimer = null;//（旧）骨架轮询定时器，保留字段兼容
+        this.watchdogTimer = null;//（旧）守护定时器，保留字段兼容
+        this.heartbeatTimer = null;//常驻心跳：1s 一次，兜底补挂
+        this.retryDelay = 0;//挂载失败后的退避
+        this.nextTryAt = 0;
+        this.emptyUntil = 0;//媒体库为空时的长退避
+        this.hbIdle = 0;
+        this.zeroTicks = 0;//banner 高度连续为 0 的次数
+        this.zeroRemounts = 0;
+        this.layoutSynced = false;//Swiper 尺寸是否已同步过
+        this.failInfo = null;//最近一次失败快照（成功后也不清）
+        this.diagBuf = [];//诊断日志缓冲
+        this.bootAt = Date.now();//本会话起始时间，日志里用来区分会话
+        this.layoutBound = false;//尺寸监听是否已绑定
+        /* ===== 排查开关：平时都保持 false（完全静默）。
+           以后要是又出现不挂载/不显示，把这两个改成 true，重现一次，就能取回现场：
+             true  → 右下角显示失败原因（DEBUG_BADGE）
+             true  → 把日志写进服务端 DisplayPreferences（DIAG_TO_SERVER）
+           两个都关掉时：不打印 console、不写服务端、不弹提示；日志仍只在内存缓冲里滚（最多 120 行），
+           失败快照仍会存进本机 localStorage 的 CACHE|hsFail（约 4KB，方便事后取回）。 */
+        this.DEBUG_BADGE = false;//挂载失败时右下角显示诊断条
+        this.DIAG_TO_SERVER = false;//把诊断日志写到服务端 DisplayPreferences
         this.SwiperCss = `
 		/**
 		* Swiper 11.1.14
@@ -32,152 +79,627 @@ class HomeSwiper {
 		@font-face{font-family:swiper-icons;src:url('data:application/font-woff;charset=utf-8;base64, d09GRgABAAAAAAZgABAAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABGRlRNAAAGRAAAABoAAAAci6qHkUdERUYAAAWgAAAAIwAAACQAYABXR1BPUwAABhQAAAAuAAAANuAY7+xHU1VCAAAFxAAAAFAAAABm2fPczU9TLzIAAAHcAAAASgAAAGBP9V5RY21hcAAAAkQAAACIAAABYt6F0cBjdnQgAAACzAAAAAQAAAAEABEBRGdhc3AAAAWYAAAACAAAAAj//wADZ2x5ZgAAAywAAADMAAAD2MHtryVoZWFkAAABbAAAADAAAAA2E2+eoWhoZWEAAAGcAAAAHwAAACQC9gDzaG10eAAAAigAAAAZAAAArgJkABFsb2NhAAAC0AAAAFoAAABaFQAUGG1heHAAAAG8AAAAHwAAACAAcABAbmFtZQAAA/gAAAE5AAACXvFdBwlwb3N0AAAFNAAAAGIAAACE5s74hXjaY2BkYGAAYpf5Hu/j+W2+MnAzMYDAzaX6QjD6/4//Bxj5GA8AuRwMYGkAPywL13jaY2BkYGA88P8Agx4j+/8fQDYfA1AEBWgDAIB2BOoAeNpjYGRgYNBh4GdgYgABEMnIABJzYNADCQAACWgAsQB42mNgYfzCOIGBlYGB0YcxjYGBwR1Kf2WQZGhhYGBiYGVmgAFGBiQQkOaawtDAoMBQxXjg/wEGPcYDDA4wNUA2CCgwsAAAO4EL6gAAeNpj2M0gyAACqxgGNWBkZ2D4/wMA+xkDdgAAAHjaY2BgYGaAYBkGRgYQiAHyGMF8FgYHIM3DwMHABGQrMOgyWDLEM1T9/w8UBfEMgLzE////P/5//f/V/xv+r4eaAAeMbAxwIUYmIMHEgKYAYjUcsDAwsLKxc3BycfPw8jEQA/gZBASFhEVExcQlJKWkZWTl5BUUlZRVVNXUNTQZBgMAAMR+E+gAEQFEAAAAKgAqACoANAA+AEgAUgBcAGYAcAB6AIQAjgCYAKIArAC2AMAAygDUAN4A6ADyAPwBBgEQARoBJAEuATgBQgFMAVYBYAFqAXQBfgGIAZIBnAGmAbIBzgHsAAB42u2NMQ6CUAyGW568x9AneYYgm4MJbhKFaExIOAVX8ApewSt4Bic4AfeAid3VOBixDxfPYEza5O+Xfi04YADggiUIULCuEJK8VhO4bSvpdnktHI5QCYtdi2sl8ZnXaHlqUrNKzdKcT8cjlq+rwZSvIVczNiezsfnP/uznmfPFBNODM2K7MTQ45YEAZqGP81AmGGcF3iPqOop0r1SPTaTbVkfUe4HXj97wYE+yNwWYxwWu4v1ugWHgo3S1XdZEVqWM7ET0cfnLGxWfkgR42o2PvWrDMBSFj/IHLaF0zKjRgdiVMwScNRAoWUoH78Y2icB/yIY09An6AH2Bdu/UB+yxopYshQiEvnvu0dURgDt8QeC8PDw7Fpji3fEA4z/PEJ6YOB5hKh4dj3EvXhxPqH/SKUY3rJ7srZ4FZnh1PMAtPhwP6fl2PMJMPDgeQ4rY8YT6Gzao0eAEA409DuggmTnFnOcSCiEiLMgxCiTI6Cq5DZUd3Qmp10vO0LaLTd2cjN4fOumlc7lUYbSQcZFkutRG7g6JKZKy0RmdLY680CDnEJ+UMkpFFe1RN7nxdVpXrC4aTtnaurOnYercZg2YVmLN/d/gczfEimrE/fs/bOuq29Zmn8tloORaXgZgGa78yO9/cnXm2BpaGvq25Dv9S4E9+5SIc9PqupJKhYFSSl47+Qcr1mYNAAAAeNptw0cKwkAAAMDZJA8Q7OUJvkLsPfZ6zFVERPy8qHh2YER+3i/BP83vIBLLySsoKimrqKqpa2hp6+jq6RsYGhmbmJqZSy0sraxtbO3sHRydnEMU4uR6yx7JJXveP7WrDycAAAAAAAH//wACeNpjYGRgYOABYhkgZgJCZgZNBkYGLQZtIJsFLMYAAAw3ALgAeNolizEKgDAQBCchRbC2sFER0YD6qVQiBCv/H9ezGI6Z5XBAw8CBK/m5iQQVauVbXLnOrMZv2oLdKFa8Pjuru2hJzGabmOSLzNMzvutpB3N42mNgZGBg4GKQYzBhYMxJLMlj4GBgAYow/P/PAJJhLM6sSoWKfWCAAwDAjgbRAAB42mNgYGBkAIIbCZo5IPrmUn0hGA0AO8EFTQAA');font-weight:400;font-style:normal}:root{--swiper-theme-color:#007aff}:host{position:relative;display:block;margin-left:auto;margin-right:auto;z-index:1}.swiper{margin-left:auto;margin-right:auto;position:relative;overflow:hidden;list-style:none;padding:0;z-index:1;display:block}.swiper-vertical>.swiper-wrapper{flex-direction:column}.swiper-wrapper{position:relative;width:100%;height:100%;z-index:1;display:flex;transition-property:transform;transition-timing-function:var(--swiper-wrapper-transition-timing-function,initial);box-sizing:content-box}.swiper-android .swiper-slide,.swiper-ios .swiper-slide,.swiper-wrapper{transform:translate3d(0px,0,0)}.swiper-horizontal{touch-action:pan-y}.swiper-vertical{touch-action:pan-x}.swiper-slide{flex-shrink:0;width:100%;height:100%;position:relative;transition-property:transform;display:block}.swiper-slide-invisible-blank{visibility:hidden}.swiper-autoheight,.swiper-autoheight .swiper-slide{height:auto}.swiper-autoheight .swiper-wrapper{align-items:flex-start;transition-property:transform,height}.swiper-backface-hidden .swiper-slide{transform:translateZ(0);-webkit-backface-visibility:hidden;backface-visibility:hidden}.swiper-3d.swiper-css-mode .swiper-wrapper{perspective:1200px}.swiper-3d .swiper-wrapper{transform-style:preserve-3d}.swiper-3d{perspective:1200px}.swiper-3d .swiper-cube-shadow,.swiper-3d .swiper-slide{transform-style:preserve-3d}.swiper-css-mode>.swiper-wrapper{overflow:auto;scrollbar-width:none;-ms-overflow-style:none}.swiper-css-mode>.swiper-wrapper::-webkit-scrollbar{display:none}.swiper-css-mode>.swiper-wrapper>.swiper-slide{scroll-snap-align:start start}.swiper-css-mode.swiper-horizontal>.swiper-wrapper{scroll-snap-type:x mandatory}.swiper-css-mode.swiper-vertical>.swiper-wrapper{scroll-snap-type:y mandatory}.swiper-css-mode.swiper-free-mode>.swiper-wrapper{scroll-snap-type:none}.swiper-css-mode.swiper-free-mode>.swiper-wrapper>.swiper-slide{scroll-snap-align:none}.swiper-css-mode.swiper-centered>.swiper-wrapper::before{content:'';flex-shrink:0;order:9999}.swiper-css-mode.swiper-centered>.swiper-wrapper>.swiper-slide{scroll-snap-align:center center;scroll-snap-stop:always}.swiper-css-mode.swiper-centered.swiper-horizontal>.swiper-wrapper>.swiper-slide:first-child{margin-inline-start:var(--swiper-centered-offset-before)}.swiper-css-mode.swiper-centered.swiper-horizontal>.swiper-wrapper::before{height:100%;min-height:1px;width:var(--swiper-centered-offset-after)}.swiper-css-mode.swiper-centered.swiper-vertical>.swiper-wrapper>.swiper-slide:first-child{margin-block-start:var(--swiper-centered-offset-before)}.swiper-css-mode.swiper-centered.swiper-vertical>.swiper-wrapper::before{width:100%;min-width:1px;height:var(--swiper-centered-offset-after)}.swiper-3d .swiper-slide-shadow,.swiper-3d .swiper-slide-shadow-bottom,.swiper-3d .swiper-slide-shadow-left,.swiper-3d .swiper-slide-shadow-right,.swiper-3d .swiper-slide-shadow-top{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:10}.swiper-3d .swiper-slide-shadow{background:rgba(0,0,0,.15)}.swiper-3d .swiper-slide-shadow-left{background-image:linear-gradient(to left,rgba(0,0,0,.5),rgba(0,0,0,0))}.swiper-3d .swiper-slide-shadow-right{background-image:linear-gradient(to right,rgba(0,0,0,.5),rgba(0,0,0,0))}.swiper-3d .swiper-slide-shadow-top{background-image:linear-gradient(to top,rgba(0,0,0,.5),rgba(0,0,0,0))}.swiper-3d .swiper-slide-shadow-bottom{background-image:linear-gradient(to bottom,rgba(0,0,0,.5),rgba(0,0,0,0))}.swiper-lazy-preloader{width:42px;height:42px;position:absolute;left:50%;top:50%;margin-left:-21px;margin-top:-21px;z-index:10;transform-origin:50%;box-sizing:border-box;border:4px solid var(--swiper-preloader-color,var(--swiper-theme-color));border-radius:50%;border-top-color:transparent}.swiper-watch-progress .swiper-slide-visible .swiper-lazy-preloader,.swiper:not(.swiper-watch-progress) .swiper-lazy-preloader{animation:swiper-preloader-spin 1s infinite linear}.swiper-lazy-preloader-white{--swiper-preloader-color:#fff}.swiper-lazy-preloader-black{--swiper-preloader-color:#000}@keyframes swiper-preloader-spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}.swiper-virtual .swiper-slide{-webkit-backface-visibility:hidden;transform:translateZ(0)}.swiper-virtual.swiper-css-mode .swiper-wrapper::after{content:'';position:absolute;left:0;top:0;pointer-events:none}.swiper-virtual.swiper-css-mode.swiper-horizontal .swiper-wrapper::after{height:1px;width:var(--swiper-virtual-size)}.swiper-virtual.swiper-css-mode.swiper-vertical .swiper-wrapper::after{width:1px;height:var(--swiper-virtual-size)}:root{--swiper-navigation-size:44px}.swiper-button-next,.swiper-button-prev{position:absolute;top:var(--swiper-navigation-top-offset,50%);width:calc(var(--swiper-navigation-size)/ 44 * 27);height:var(--swiper-navigation-size);margin-top:calc(0px - (var(--swiper-navigation-size)/ 2));z-index:10;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--swiper-navigation-color,var(--swiper-theme-color))}.swiper-button-next.swiper-button-disabled,.swiper-button-prev.swiper-button-disabled{opacity:.35;cursor:auto;pointer-events:none}.swiper-button-next.swiper-button-hidden,.swiper-button-prev.swiper-button-hidden{opacity:0;cursor:auto;pointer-events:none}.swiper-navigation-disabled .swiper-button-next,.swiper-navigation-disabled .swiper-button-prev{display:none!important}.swiper-button-next svg,.swiper-button-prev svg{width:100%;height:100%;object-fit:contain;transform-origin:center}.swiper-rtl .swiper-button-next svg,.swiper-rtl .swiper-button-prev svg{transform:rotate(180deg)}.swiper-button-prev,.swiper-rtl .swiper-button-next{left:var(--swiper-navigation-sides-offset,10px);right:auto}.swiper-button-next,.swiper-rtl .swiper-button-prev{right:var(--swiper-navigation-sides-offset,10px);left:auto}.swiper-button-lock{display:none}.swiper-button-next:after,.swiper-button-prev:after{font-family:swiper-icons;font-size:var(--swiper-navigation-size);text-transform:none!important;letter-spacing:0;font-variant:initial;line-height:1}.swiper-button-prev:after,.swiper-rtl .swiper-button-next:after{content:'prev'}.swiper-button-next,.swiper-rtl .swiper-button-prev{right:var(--swiper-navigation-sides-offset,10px);left:auto}.swiper-button-next:after,.swiper-rtl .swiper-button-prev:after{content:'next'}.swiper-pagination{position:absolute;text-align:center;transition:.3s opacity;transform:translate3d(0,0,0);z-index:10}.swiper-pagination.swiper-pagination-hidden{opacity:0}.swiper-pagination-disabled>.swiper-pagination,.swiper-pagination.swiper-pagination-disabled{display:none!important}.swiper-horizontal>.swiper-pagination-bullets,.swiper-pagination-bullets.swiper-pagination-horizontal,.swiper-pagination-custom,.swiper-pagination-fraction{bottom:var(--swiper-pagination-bottom,8px);top:var(--swiper-pagination-top,auto);left:0;width:100%}.swiper-pagination-bullets-dynamic{overflow:hidden;font-size:0}.swiper-pagination-bullets-dynamic .swiper-pagination-bullet{transform:scale(.33);position:relative}.swiper-pagination-bullets-dynamic .swiper-pagination-bullet-active{transform:scale(1)}.swiper-pagination-bullets-dynamic .swiper-pagination-bullet-active-main{transform:scale(1)}.swiper-pagination-bullets-dynamic .swiper-pagination-bullet-active-prev{transform:scale(.66)}.swiper-pagination-bullets-dynamic .swiper-pagination-bullet-active-prev-prev{transform:scale(.33)}.swiper-pagination-bullets-dynamic .swiper-pagination-bullet-active-next{transform:scale(.66)}.swiper-pagination-bullets-dynamic .swiper-pagination-bullet-active-next-next{transform:scale(.33)}.swiper-pagination-bullet{width:var(--swiper-pagination-bullet-width,var(--swiper-pagination-bullet-size,8px));height:var(--swiper-pagination-bullet-height,var(--swiper-pagination-bullet-size,8px));display:inline-block;border-radius:var(--swiper-pagination-bullet-border-radius,50%);background:var(--swiper-pagination-bullet-inactive-color,#000);opacity:var(--swiper-pagination-bullet-inactive-opacity, .2)}button.swiper-pagination-bullet{border:none;margin:0;padding:0;box-shadow:none;-webkit-appearance:none;appearance:none}.swiper-pagination-clickable .swiper-pagination-bullet{cursor:pointer}.swiper-pagination-bullet:only-child{display:none!important}.swiper-pagination-bullet-active{opacity:var(--swiper-pagination-bullet-opacity, 1);background:var(--swiper-pagination-color,var(--swiper-theme-color))}.swiper-pagination-vertical.swiper-pagination-bullets,.swiper-vertical>.swiper-pagination-bullets{right:var(--swiper-pagination-right,8px);left:var(--swiper-pagination-left,auto);top:50%;transform:translate3d(0px,-50%,0)}.swiper-pagination-vertical.swiper-pagination-bullets .swiper-pagination-bullet,.swiper-vertical>.swiper-pagination-bullets .swiper-pagination-bullet{margin:var(--swiper-pagination-bullet-vertical-gap,6px) 0;display:block}.swiper-pagination-vertical.swiper-pagination-bullets.swiper-pagination-bullets-dynamic,.swiper-vertical>.swiper-pagination-bullets.swiper-pagination-bullets-dynamic{top:50%;transform:translateY(-50%);width:8px}.swiper-pagination-vertical.swiper-pagination-bullets.swiper-pagination-bullets-dynamic .swiper-pagination-bullet,.swiper-vertical>.swiper-pagination-bullets.swiper-pagination-bullets-dynamic .swiper-pagination-bullet{display:inline-block;transition:.2s transform,.2s top}.swiper-horizontal>.swiper-pagination-bullets .swiper-pagination-bullet,.swiper-pagination-horizontal.swiper-pagination-bullets .swiper-pagination-bullet{margin:0 var(--swiper-pagination-bullet-horizontal-gap,4px)}.swiper-horizontal>.swiper-pagination-bullets.swiper-pagination-bullets-dynamic,.swiper-pagination-horizontal.swiper-pagination-bullets.swiper-pagination-bullets-dynamic{left:50%;transform:translateX(-50%);white-space:nowrap}.swiper-horizontal>.swiper-pagination-bullets.swiper-pagination-bullets-dynamic .swiper-pagination-bullet,.swiper-pagination-horizontal.swiper-pagination-bullets.swiper-pagination-bullets-dynamic .swiper-pagination-bullet{transition:.2s transform,.2s left}.swiper-horizontal.swiper-rtl>.swiper-pagination-bullets-dynamic .swiper-pagination-bullet{transition:.2s transform,.2s right}.swiper-pagination-fraction{color:var(--swiper-pagination-fraction-color,inherit)}.swiper-pagination-progressbar{background:var(--swiper-pagination-progressbar-bg-color,rgba(0,0,0,.25));position:absolute}.swiper-pagination-progressbar .swiper-pagination-progressbar-fill{background:var(--swiper-pagination-color,var(--swiper-theme-color));position:absolute;left:0;top:0;width:100%;height:100%;transform:scale(0);transform-origin:left top}.swiper-rtl .swiper-pagination-progressbar .swiper-pagination-progressbar-fill{transform-origin:right top}.swiper-horizontal>.swiper-pagination-progressbar,.swiper-pagination-progressbar.swiper-pagination-horizontal,.swiper-pagination-progressbar.swiper-pagination-vertical.swiper-pagination-progressbar-opposite,.swiper-vertical>.swiper-pagination-progressbar.swiper-pagination-progressbar-opposite{width:100%;height:var(--swiper-pagination-progressbar-size,4px);left:0;top:0}.swiper-horizontal>.swiper-pagination-progressbar.swiper-pagination-progressbar-opposite,.swiper-pagination-progressbar.swiper-pagination-horizontal.swiper-pagination-progressbar-opposite,.swiper-pagination-progressbar.swiper-pagination-vertical,.swiper-vertical>.swiper-pagination-progressbar{width:var(--swiper-pagination-progressbar-size,4px);height:100%;left:0;top:0}.swiper-pagination-lock{display:none}.swiper-scrollbar{border-radius:var(--swiper-scrollbar-border-radius,10px);position:relative;touch-action:none;background:var(--swiper-scrollbar-bg-color,rgba(0,0,0,.1))}.swiper-scrollbar-disabled>.swiper-scrollbar,.swiper-scrollbar.swiper-scrollbar-disabled{display:none!important}.swiper-horizontal>.swiper-scrollbar,.swiper-scrollbar.swiper-scrollbar-horizontal{position:absolute;left:var(--swiper-scrollbar-sides-offset,1%);bottom:var(--swiper-scrollbar-bottom,4px);top:var(--swiper-scrollbar-top,auto);z-index:50;height:var(--swiper-scrollbar-size,4px);width:calc(100% - 2 * var(--swiper-scrollbar-sides-offset,1%))}.swiper-scrollbar.swiper-scrollbar-vertical,.swiper-vertical>.swiper-scrollbar{position:absolute;left:var(--swiper-scrollbar-left,auto);right:var(--swiper-scrollbar-right,4px);top:var(--swiper-scrollbar-sides-offset,1%);z-index:50;width:var(--swiper-scrollbar-size,4px);height:calc(100% - 2 * var(--swiper-scrollbar-sides-offset,1%))}.swiper-scrollbar-drag{height:100%;width:100%;position:relative;background:var(--swiper-scrollbar-drag-bg-color,rgba(0,0,0,.5));border-radius:var(--swiper-scrollbar-border-radius,10px);left:0;top:0}.swiper-scrollbar-cursor-drag{cursor:move}.swiper-scrollbar-lock{display:none}.swiper-zoom-container{width:100%;height:100%;display:flex;justify-content:center;align-items:center;text-align:center}.swiper-zoom-container>canvas,.swiper-zoom-container>img,.swiper-zoom-container>svg{max-width:100%;max-height:100%;object-fit:contain}.swiper-slide-zoomed{cursor:move;touch-action:none}.swiper .swiper-notification{position:absolute;left:0;top:0;pointer-events:none;opacity:0;z-index:-1000}.swiper-free-mode>.swiper-wrapper{transition-timing-function:ease-out;margin:0 auto}.swiper-grid>.swiper-wrapper{flex-wrap:wrap}.swiper-grid-column>.swiper-wrapper{flex-wrap:wrap;flex-direction:column}.swiper-fade.swiper-free-mode .swiper-slide{transition-timing-function:ease-out}.swiper-fade .swiper-slide{pointer-events:none;transition-property:opacity}.swiper-fade .swiper-slide .swiper-slide{pointer-events:none}.swiper-fade .swiper-slide-active{pointer-events:auto}.swiper-fade .swiper-slide-active .swiper-slide-active{pointer-events:auto}.swiper.swiper-cube{overflow:visible}.swiper-cube .swiper-slide{pointer-events:none;-webkit-backface-visibility:hidden;backface-visibility:hidden;z-index:1;visibility:hidden;transform-origin:0 0;width:100%;height:100%}.swiper-cube .swiper-slide .swiper-slide{pointer-events:none}.swiper-cube.swiper-rtl .swiper-slide{transform-origin:100% 0}.swiper-cube .swiper-slide-active,.swiper-cube .swiper-slide-active .swiper-slide-active{pointer-events:auto}.swiper-cube .swiper-slide-active,.swiper-cube .swiper-slide-next,.swiper-cube .swiper-slide-prev{pointer-events:auto;visibility:visible}.swiper-cube .swiper-cube-shadow{position:absolute;left:0;bottom:0px;width:100%;height:100%;opacity:.6;z-index:0}.swiper-cube .swiper-cube-shadow:before{content:'';background:#000;position:absolute;left:0;top:0;bottom:0;right:0;filter:blur(50px)}.swiper-cube .swiper-slide-next+.swiper-slide{pointer-events:auto;visibility:visible}.swiper-cube .swiper-slide-shadow-cube.swiper-slide-shadow-bottom,.swiper-cube .swiper-slide-shadow-cube.swiper-slide-shadow-left,.swiper-cube .swiper-slide-shadow-cube.swiper-slide-shadow-right,.swiper-cube .swiper-slide-shadow-cube.swiper-slide-shadow-top{z-index:0;-webkit-backface-visibility:hidden;backface-visibility:hidden}.swiper.swiper-flip{overflow:visible}.swiper-flip .swiper-slide{pointer-events:none;-webkit-backface-visibility:hidden;backface-visibility:hidden;z-index:1}.swiper-flip .swiper-slide .swiper-slide{pointer-events:none}.swiper-flip .swiper-slide-active,.swiper-flip .swiper-slide-active .swiper-slide-active{pointer-events:auto}.swiper-flip .swiper-slide-shadow-flip.swiper-slide-shadow-bottom,.swiper-flip .swiper-slide-shadow-flip.swiper-slide-shadow-left,.swiper-flip .swiper-slide-shadow-flip.swiper-slide-shadow-right,.swiper-flip .swiper-slide-shadow-flip.swiper-slide-shadow-top{z-index:0;-webkit-backface-visibility:hidden;backface-visibility:hidden}.swiper-creative .swiper-slide{-webkit-backface-visibility:hidden;backface-visibility:hidden;overflow:hidden;transition-property:transform,opacity,height}.swiper.swiper-cards{overflow:visible}.swiper-cards .swiper-slide{transform-origin:center bottom;-webkit-backface-visibility:hidden;backface-visibility:hidden;overflow:hidden}
 		`;
         this.customCss = `div.swiper-pagination-bullet { transition: height 0.2s ease-in-out 0s; } div.swiper-button-next:hover, div.swiper-button-prev:hover { background-color: rgba(0, 0, 0, 0.5); transform: scale(1.1); } div.swiper-button-next, div.swiper-button-prev { border-radius: 10em; width: calc(var(--swiper-navigation-size) + 3em); height: calc(var(--swiper-navigation-size) + 3em); margin-top: calc(0px - ((var(--swiper-navigation-size) + 3em) / 2)); -webkit-box-shadow: 0px 0px 15px 0px rgb(0 0 0 / 99%); -moz-box-shadow: 0px 0px 15px 0px rgb(0 0 0 / 99%); box-shadow: 0px 0px 15px 0px rgb(0 0 0 / 99%); -webkit-backdrop-filter: blur(0.5em) saturate(0.5); backdrop-filter: blur(0.5em) saturate(0.5); background-color: rgba(0, 0, 0, 0.6); } div.swiper-button-next:after, div.swiper-button-prev:after { font-weight: 700; } img.homevideos { object-position: center !important; } .homevideos .swiper-pagination.swiper-pagination-bullets.swiper-pagination-horizontal { right: var(--swiper-pagination-right, 8px) !important; left: var(--swiper-pagination-left, auto) !important; top: 50%; transform: translate3d(0px, -50%, 0); width: auto; bottom: auto; } .homevideos .swiper-horizontal > .swiper-pagination-bullets .swiper-pagination-bullet, .homevideos .swiper-pagination-horizontal.swiper-pagination-bullets .swiper-pagination-bullet { margin: var(--swiper-pagination-bullet-vertical-gap, 6px) 0; display: block; }  .cardLibText { position: absolute; bottom: 0.5em; left: 0.5em; font-weight: bolder; font-size: clamp(1rem, 0.2rem + 1vw, 1.2rem); color: #ffffff; border-radius: 0; pointer-events: none; } .cardLibText button { border-radius: 0; } .my-button-disabled, .my-button-hidden { opacity: 0 !important; } .swiper-slide.swiper-null.swiper-slide-active { text-align: center; justify-content: center; display: flex; align-items: center; font-size: 3em; } div.swiper-slide { overflow: hidden; } .banner-cover { display: -webkit-box; display: -ms-flexbox; display: -webkit-flex; display: flex; -webkit-box-pack: center; -ms-flex-pack: center; -webkit-justify-content: center; justify-content: center; -webkit-box-align: center; -ms-flex-align: center; -webkit-align-items: center; align-items: center; } div.swiper { width: 100%; height: 100%; margin-left: auto; margin-right: auto; position: absolute; right: 0; bottom: 0; --swiper-theme-color: #ff6600; --swiper-pagination-color: #00ff33 !important; --swiper-pagination-bottom: 0; --swiper-navigation-sides-offset: 30px; --swiper-pagination-bullet-border-radius: 10px; --swiper-pagination-bullet-inactive-color: #ffffff; --swiper-pagination-bullet-inactive-opacity: 1; --swiper-pagination-bullet-opacity: 1; --swiper-pagination-bullet-width: 6px; --swiper-pagination-bullet-height: 20px; --swiper-navigation-size: 20px; } div.swiper-pagination-bullet-active { height: 33px; box-shadow: 0px 0px 20px rgba(252, 56, 56, 0.3); } div.swiper-pagination-bullets.swiper-pagination-horizontal { left: calc(3.4vw + min(0.72em, max(0.48em, 1.78vw))) !important; text-align: left; } .mySwiper .swiper-slide { /* box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5), 0 -1px 0 hsla(0, 0%, 100%, 0.5); */ transition: all 0.3s cubic-bezier(0, 1.75, 0.25, 1) 0s; margin-top: 50px; bottom: 0; } .mySwiper .swiper-slide:hover { transform: scale(1.05); bottom: 10px; } .swiper-button-next.swiper-button-disabled, .swiper-button-prev.swiper-button-disabled { opacity: 0; } div.swiper-button-next, div.swiper-button-prev { opacity: 0; transition: opacity 0.5s ease-in-out; } .mySwiper-main:hover .swiper-button-next, .mySwiper-main:hover .swiper-button-prev { opacity: 1; } .swiper-button-next.swiper-child-button, .swiper-button-prev.swiper-child-button { transform: rotate(90deg) scale(0.9); left: auto; right: 28px; } .swiper-button-next.swiper-child-button:hover, .swiper-button-prev.swiper-child-button:hover { transform: rotate(90deg) scale(1); } .swiper-button-next.swiper-child-button { top: 65%; } .swiper-button-prev.swiper-child-button { top: 35%; } .swiper-slide .custom { color: #fff; -webkit-box-sizing: border-box; box-sizing: border-box; padding-bottom: 40px; padding-left: calc(3.4vw + min(0.72em, max(0.48em, 1.78vw))); position: absolute; left: 0; bottom: 10px; } .swiper-slide img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; } div.swiper-slide { background-size: cover; background-position: center; } div.mySwiper-main { height: 100%; width: 100%; } div.mySwiper { height: auto; box-sizing: border-box; padding-bottom: 10px; right: 3.4%; width: 62%; } .mySwiper .swiper-slide { width: 25%; filter: brightness(0.6); } .mySwiper-main .swiper-slide .banner-cover { object-position: top; -webkit-mask-image: linear-gradient(to top, transparent 0%, black 30%); mask-image: linear-gradient(to top, transparent 0%, black 30%); } .mySwiper .swiper-slide-thumb-active { opacity: 1; bottom: 10px; transform: scale(1.05); filter: brightness(1); } .swiper-slide .title { font-size: 70px; font-weight: 700; text-align: left; } .swiper-slide .subtitle { font-size: 28px; font-weight: 500; text-align: left; } .swiper-slide .text { font-size: 20px; max-width: 30vw; line-height: 1.3; text-align: left; } @media (min-width: 2560px) { .swiper-slide .text { max-width: 26vw; } div.mySwiper { width: 66%; } } .custom > * { transition: all 1.5s cubic-bezier(0, 1.41, 0.36, 0.93) 0.4s; transform: translateY(150%); opacity: 0 !important; } .swiper-slide-active .swiper-slide-active > .custom > * { transform: translateY(0); opacity: 1 !important; } .custom > div:nth-child(1) { transition-delay: 1s; } .custom > div:nth-child(2) { transition-delay: 1.2s; } .custom > div:nth-child(3) { transition-delay: 1.4s; } .custom > div:nth-child(4) { transition-delay: 1.6s; } .custom .title { color: #fff !important; font-size: clamp(2rem, -0.362rem + 6.75vw, 4.7rem); font-weight: bolder; margin: 0; text-shadow: 0 4px 10px rgb(0 0 0 / 20%); max-width: 50vw; display: -webkit-box !important; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden; } .custom .subtitle { font-size: clamp(1rem, 0.5rem + 1vw, 1.7rem); font-weight: bold; text-align: left; } .custom p { color: #fff !important; font-size: clamp(1rem, 0.4rem + 1vw, 1.6rem); font-weight: bold; opacity: 0.7; display: -webkit-box !important; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; } .swiper-slide .morebutton { text-align: left; } .autoplay-progress { position: absolute; left: 6px; bottom: 6px; z-index: 10; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-weight: bold; color: var(--swiper-theme-color); } .autoplay-progress svg { --progress: 0; position: absolute; left: 0; top: 0px; z-index: 10; width: 100%; height: 100%; stroke-width: 4px; stroke: var(--swiper-theme-color); fill: none; stroke-dashoffset: calc(125.6 * (1 - var(--progress))); stroke-dasharray: 125.6; transform: rotate(-90deg); } .custom button { cursor: pointer; margin-top: clamp(0rem, -2.625rem + 7.5vw, 3rem); width: 6em; height: 1.8em; background-color: #fff; border: none; font-size: clamp(1rem, -0.275rem + 2.5vw, 1.6rem); border-radius: 10px; font-weight: bold; letter-spacing: 2px; box-shadow: 0 2px 7px rgba(1, 1, 1, -0.8); font-family: system-ui; transition: 0.2s; margin-right: 1rem; } .custom button:hover { transform: scale(0.95); } .banner-mask { position: absolute; width: 100%; height: 100%; top: 0; background-image: linear-gradient(90deg, rgba(0, 0, 0, 0.6), transparent); -webkit-mask-image: linear-gradient(to top, transparent 0%, black 10%); mask-image: linear-gradient(to top, transparent 0%, black 10%); pointer-events: none; } .banner-logo { position: absolute; user-select: none; object-fit: contain !important; transform: translateY(calc(-50% - clamp(-2rem, -3.455rem + 7.27vw, 2rem))); right: 0; opacity: 0; transition: 1s; transition-delay: 0.8s; width: 15% !important; height: 100px !important; bottom: min(7vw, 150px); } .swiper-slide-active .banner-logo { transform: translateY(calc(-100% - clamp(-2rem, -3.455rem + 7.27vw, 2rem))); opacity: 1; } @media not all and (min-width: 50em) { .section00 { height: min(80vh, 148.5vw) !important; } .misty-loading h1 { font-size: 2em !important; } .mySwiper .swiper-slide:not(.swiper-slide-thumb-active), .mySwiper .cardContent-shadow, .mySwiper .cardContent-background { opacity: 0; } .mySwiper .swiper-slide { box-shadow: none; } div.mySwiper { right: -30% !important; width: 60% !important; } .custom button { border-radius: 6px !important; } .swiper-button-next, .swiper-button-prev { display: none; } .swiper-slide .title { max-width: 60vw !important; } .swiper-slide .subtitle { max-width: 60vw !important; } .swiper-slide .text { max-width: 50vw !important; } .autoplay-progress { display: none; } img.banner-logo { width: 30% !important; height: 50px !important; } .custom p { -webkit-line-clamp: 2 !important; } } @media (pointer: fine) { ::-webkit-scrollbar { width: 0.3em !important; } div.overflowYScroll { scrollbar-width: auto; scrollbar-color: auto; } } .skinHeader-withBackground { right: 0 !important; background-image: linear-gradient(rgba(0, 0, 0, 0.6), transparent); background-color: unset; } .skinHeader-withBackground.headroom-scrolling { background-image: linear-gradient(black, transparent) !important; background-color: unset !important; } :is(.theme-appletv:root, .theme-light:root) .skinHeader-withBackground { background-image: linear-gradient( rgba(255, 255, 255, 0.6), transparent ) !important; } .section00 { width: 100%; height: min(56.25vw, 100vh); position: relative; margin: 0; padding: 0; -webkit-mask-image: linear-gradient(to top, transparent 0%, black 6px); mask-image: linear-gradient(to top, transparent 0%, black 6px); } .view[data-type="home"]:not(.home-horiz) > div:nth-child(1) .scrollSlider.padded-top-page, .view-home-home:not(.home-horiz) > div:nth-child(1) .scrollSlider.padded-top-page { padding-top: 0 !important; } .view[data-type="home"]:not(.home-horiz) > div:nth-child(1) [is="emby-scroller"].flex, .view-home-home:not(.home-horiz) > div:nth-child(1) [is="emby-scroller"].flex { flex-wrap: nowrap; flex-direction: column; } .misty-loading { z-index: 99999999; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 1); display: flex; align-items: center; justify-content: center; flex-direction: column; } div.dialogContainer { z-index: 999999999 !important; } .misty-loading h1 { margin: 0; margin-bottom: 3rem; text-transform: uppercase; transition: 0.8s; transform: scale(1.15); opacity: 0; font-size: 4em; } .misty-loading h1.active { transform: scale(1); opacity: 1; } .misty-loading .mdl-spinner { margin: 0; position: initial; } .misty-loading .mdl-spinner__layer-1 { border-color: #fff; } .mdl-spinner { zoom: 0.5; } .youtubePlayerContainerSwiper { position: fixed !important; top: 0; bottom: 0; left: 0; right: 0; inset-inline-start: 0; inset-inline-end: 0; display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; -webkit-mask-image: linear-gradient(to top, transparent 0%, black 20%); mask-image: linear-gradient(to top, transparent 0%, black 20%); } .video-mask { content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: none; background-image: linear-gradient( to bottom, rgb(28, 38, 41) 0%, rgba(28, 38, 41, 0.95) 2.5%, rgba(28, 38, 41, 0.1) 35%, rgba(28, 38, 41, 0) 45% ), linear-gradient( to right, rgb(28, 38, 41) 0%, rgba(28, 38, 41, 0.95) 2.5%, rgba(28, 38, 41, 0.1) 35%, rgba(28, 38, 41, 0) 45% ), linear-gradient( to left, rgb(28, 38, 41) 0%, rgba(28, 38, 41, 0.95) 2.5%, rgba(28, 38, 41, 0.1) 35%, rgba(28, 38, 41, 0) 45% ); pointer-events: none; }`;
-        function saveUser(instance, page) {
-            var user = instance.user;
-            (user.Policy.EnableAllFolders = page.querySelector(
-                ".chkEnableAllFolders"
-            ).checked),
-                (user.Policy.EnabledFolders = user.Policy.EnableAllFolders
-                    ? user.Policy.EnabledFolders.length !== 0 ? user.Policy.EnabledFolders : []
-                    : Array.prototype.filter
-                        .call(page.querySelectorAll(".chkFolder"), function (c) {
-                            return c.checked;
-                        })
-                        .map(function (c) {
-                            return c.getAttribute("data-id");
-                        }));
+        /* ==================== 事件入口 ==================== */
 
-            localStorage.setItem(ApiClient.getCurrentUserId() + "-swiperLibraryAccess", JSON.stringify(user));
-            instance.getLibItems(true);
-            require(["toast"], function (toast) {
-                toast("已保存");
-            });
-
-        }
-        /* 清除首页轮播图缓存：getLibItems 存在 localStorage，getItems 存在 sessionStorage */
-        function clearSwiperCache(page) {
-            let userId = ApiClient.getCurrentUserId();
-            let serverId = ApiClient.serverId();
-            let libItemsKey = "CACHE|getLibItems_v2" + userId + "-" + serverId;
-            let itemKeySuffix = userId + "-" + serverId;
-
-            // 1. 清除 localStorage 中的媒体库聚合缓存
-            localStorage.removeItem(libItemsKey);
-            // 2. 清除 localStorage 中的每日刷新日期标记
-            localStorage.removeItem("CACHE|Movies-Date");
-            // 3. 清除 sessionStorage 中所有 getItems 明细缓存（按 ParentId 分片存储）
-            Object.keys(sessionStorage)
-                .filter(key => key.startsWith("CACHE|getItems_v2") && key.endsWith(itemKeySuffix))
-                .forEach(key => sessionStorage.removeItem(key));
-
-            // 复位运行期标记，保证返回首页时重新拉取
-            HomeSwiper.loadFlag = false;
-            HomeSwiper.cacheRefreshFlag = false;
-            HomeSwiper.Alldata = null;
-            // 若首页元素仍在 DOM 中（缓存视图），一并移除，强制重新构建
-            document.querySelector(".mySwiper-main")?.closest(".verticalSection")?.remove();
-
-            require(["toast"], function (toast) {
-                toast("缓存已清除，返回首页将重新获取影片");
-            });
-            page && console.info("[HomeSwiper] 轮播图缓存已清除");
-        }
-
-        function renderMediaFolders(page, user, mediaFolders) {
-
-            var html =
-                '<div class="checkboxListLabel"><label><h3 style="margin: 0 10px 0 0;">媒体库全选</h3><input type="checkbox" is="emby-checkbox" class="chkAllFolder"><span style="font-size: .7em;"><h3 style="margin:0;"></h3></span></label></div><div class="checkboxLists">';
-            for (var i = 0, length = mediaFolders.length; i < length; i++) {
-                var folder = mediaFolders[i],
-                    folderId = folder.Guid || folder.Id,
-                    isChecked =
-                        (user.Policy.EnabledFolders.length === 0 && user.Policy.EnableAllFolders) ||
-                        user.Policy.EnabledFolders.includes(folderId),
-                    html =
-                        (html =
-                            (html += '<div class="checkboxList" style="margin:0 0 1.5em;">') +
-                            ('<label><input type="checkbox" is="emby-checkbox" class="chkFolder" data-id="' +
-                                folderId +
-                                '" ' +
-                                (isChecked ? ' checked="checked"' : "") +
-                                '><span><h3 style="margin:0;">' +
-                                folder.Name +
-                                "</h3></span></label>")) +
-                        "</div>";
-            }
-            (html += "</div>"), page.querySelector(".folderAccess").innerHTML = html;
-            page = page.querySelector(".chkEnableAllFolders");
-            (page.checked = user.Policy.EnableAllFolders);
-        }
-        document.addEventListener("viewbeforeshow", async function (e) {
+        /* 主入口：viewbeforeshow（PC 稳定命中的路径） */
+        document.addEventListener("viewbeforeshow", function (e) {
+            const detail = (e && e.detail) || {};
+            const target = e && e.target;
             this.flag_cssjs = false;
-            if (e.detail.type === "home") {
-                if (!e.detail.isRestored) {
-                    !document.getElementById("SwiperCss") && CommonUtils.loadExtastyle(this.SwiperCss, 'SwiperCss');
-                    !document.getElementById("customCss") && CommonUtils.loadExtastyle(this.customCss, 'customCss');
-                    let swiperLibraryAccess = localStorage.getItem(ApiClient.getCurrentUserId() + "-swiperLibraryAccess");
-                    this.user = swiperLibraryAccess ? JSON.parse(swiperLibraryAccess) : { Policy: { EnableAllFolders: true, EnabledFolders: [] } };
-                    !localStorage.getItem('CACHE|Movies-Date') && !this.loadFlag && e.detail.contextPath.endsWith("home") && this.initLoading();
-                    e.target.setAttribute("data-type", "home");
-                    this.mutation = new MutationObserver(async function (mutationRecoards) {
-                        for (let mutationRecoard of mutationRecoards) {
-                            if (mutationRecoard.target.classList.contains("homeSectionsContainer")) {
-                                this.mutation.disconnect();
-                                !document.getElementById("SwiperCss") && CommonUtils.loadExtastyle(this.SwiperCss, 'SwiperCss');
-                                !document.getElementById("customCss") && CommonUtils.loadExtastyle(this.customCss, 'customCss');
-
-                                // 修复问题2：必须先 await 等待图片检测完毕
-                                let elem = await this.initBanner();
-                                // await 之后重新去获取页面上最新的 .sections 节点，防止原节点已被 Emby 销毁
-                                let sections = e.target.querySelector(".sections");
-
-                                if (elem && sections && sections.parentNode) {
-                                    sections.parentNode.insertBefore(elem, sections);
-                                    this.loadFlag && this.fadeOut(document.querySelector(".misty-loading"), 500, () => document.querySelector(".misty-loading").remove());
-                                    this.initSwiper(e.target);
-                                } else {
-                                    this.loadFlag && this.fadeOut(document.querySelector(".misty-loading"), 500, () => document.querySelector(".misty-loading").remove());
-                                    document.getElementById("customCss")?.remove();
-                                    document.getElementById("SwiperCss")?.remove();
-                                }
-                                break;
-                            }
-                        }
-
-                    }.bind(this));
-
-                    this.mutation.observe(e.target, {
-                        attributes:true,
-                        childList: true,
-                        characterData: true,
-                        subtree: true,
-                    });
+            try {
+                if (detail.type === "home" || this.isHomeView(target)) {
+                    this.trace("event viewbeforeshow(home) isRestored=" + !!detail.isRestored);
+                    target && target.setAttribute && target.setAttribute("data-type", "home");
+                    this.ensureStyles();
+                    this.loadUser();
+                    const swiperDom = target && target.querySelector(".mySwiper-main");
+                    if (detail.isRestored && swiperDom && swiperDom.swiper) {
+                        this.onHomeRestored(target);
+                    } else {
+                        this.nudgeHome(target);
+                    }
                 } else {
-                    this.swiper = e.target.querySelector('.mySwiper').swiper;
-                    this.swiper2 = e.target.querySelector('.mySwiper-main').swiper;
-                    this.swiper2?.enable();
-                    this.swiper2?.slides[this.swiper2.activeIndex]?.childNodes[1].swiper?.autoplay.start();
-                    this.swiper & setTimeout(() => Emby.Page.setTitle("每日推荐"), 1000);
+                    this.trace("event viewbeforeshow(" + (detail.type || "?") + ")");
+                    this.onLeaveHome(target, detail);
+                    if (detail.type === "settings" && detail.title === "HeaderHomeScreen" && !detail.isRestored) {
+                        this.renderSwiperSettings(target);
+                    }
                 }
+            } catch (err) {
+                this.diag("viewbeforeshow ERROR: " + this.errText(err));
+                try { this.nudgeHome(target); } catch (err2) { }
+            }
+        }.bind(this));
 
+        /* 有些客户端（尤其是 app/WebView）不一定派发 home 的 viewbeforeshow，viewshow 再兜一层 */
+        document.addEventListener("viewshow", function (e) {
+            try {
+                const target = e && e.target;
+                if (!this.isHomeView(target)) return;
+                this.trace("event viewshow(home)");
+                if (!this.hasBanner(target) && !this.mounting) this.nudgeHome(target);
+                else this.startHeartbeat();
+            } catch (err) { }
+        }.bind(this));
+
+        /* app 从后台回前台：WebView 会挂起定时器/渲染，回来补一次 */
+        document.addEventListener("visibilitychange", function () {
+            if (document.hidden) return;
+            try {
+                this.trace("event visibilitychange(visible)");
+                const home = this.getHomeView();
+                if (home && !this.hasBanner(home) && !this.mounting) this.nudgeHome(home);
+                else { this.layoutSynced = false; this.syncSwiperLayout(); }
+                this.startHeartbeat();
+            } catch (err) { }
+        }.bind(this));
+
+        window.addEventListener("pageshow", function () {
+            try {
+                this.trace("event pageshow");
+                const home = this.getHomeView();
+                if (home && !this.hasBanner(home) && !this.mounting) this.nudgeHome(home);
+                this.startHeartbeat();
+            } catch (err) { }
+        }.bind(this));
+
+        /* 脚本加载时首页可能已经渲染完（app/WebView 很常见），立即补挂一次，并常驻心跳兜底 */
+        setTimeout(function () {
+            try {
+                const home = this.getHomeView();
+                this.trace("boot: home view " + (home ? "found" : "missing"));
+                if (home && !this.hasBanner(home)) this.nudgeHome(home);
+                this.startHeartbeat();
+            } catch (err) {
+                this.diag("boot ERROR: " + this.errText(err));
+            }
+        }.bind(this), 0);
+    }
+
+    /* ==================== 用户 / 存储 / 诊断 ==================== */
+
+    static loadUser() {
+        try {
+            const raw = this.lsGet(ApiClient.getCurrentUserId() + "-swiperLibraryAccess");
+            this.user = raw ? JSON.parse(raw) : null;
+        } catch (err) { this.user = null; }
+        if (!this.user || !this.user.Policy) this.user = { Policy: { EnableAllFolders: true, EnabledFolders: [] } };
+        if (!this.user.Policy.EnabledFolders) this.user.Policy.EnabledFolders = [];
+        return this.user;
+    }
+
+    static errText(err) {
+        try {
+            if (!err) return "unknown";
+            let s = (err.name ? err.name + ": " : "") + (err.message || String(err));
+            if (err.stack) {
+                const l = String(err.stack).split("\n")[1];
+                if (l) s += " |" + l.trim();
+            }
+            return s;
+        } catch (e) { return "err"; }
+    }
+
+    static libCacheKey() {
+        try {
+            return "CACHE|getLibItems_v2" + ApiClient.getCurrentUserId() + "-" + ApiClient.serverId();
+        } catch (err) { return "CACHE|getLibItems_v2"; }
+    }
+
+    static lsGet(key) { try { return window.localStorage.getItem(key); } catch (err) { return null; } }
+    static lsSet(key, val) {
+        try { window.localStorage.setItem(key, val); return true; }
+        catch (err) { this.diagBufPush("localStorage fail(" + this.errText(err) + "): " + key); return false; }
+    }
+    static lsRemove(key) { try { window.localStorage.removeItem(key); } catch (err) { } }
+    static ssGet(key) { try { return window.sessionStorage.getItem(key); } catch (err) { return null; } }
+    static ssSet(key, val) {
+        try { window.sessionStorage.setItem(key, val); return true; }
+        catch (err) { this.diagBufPush("sessionStorage fail(" + this.errText(err) + "): " + key); return false; }
+    }
+    static ssRemove(key) { try { window.sessionStorage.removeItem(key); } catch (err) { } }
+
+    static todayKey() {
+        const d = new Date();
+        return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate();
+    }
+
+    static lsProbe() {
+        try {
+            const k = "__hs_probe";
+            window.localStorage.setItem(k, "1");
+            const ok = window.localStorage.getItem(k) === "1";
+            window.localStorage.removeItem(k);
+            return ok;
+        } catch (err) { return "fail:" + (err && err.name); }
+    }
+
+    /* 诊断缓冲：app 上看不到 console，所以顺手写进服务端 DisplayPreferences，
+       之后在 PC 上用 GET /emby/DisplayPreferences/homeswiper-diag?userId=..&client=homeswiper-diag 取回 */
+    /* 只进缓冲，不上传（高频心跳用，避免刷接口） */
+    static trace(msg) {
+        try {
+            this.diagBuf = this.diagBuf || [];
+            this.diagBuf.push("[HomeSwiper] " + msg);
+            if (this.diagBuf.length > 120) this.diagBuf.shift();
+        } catch (err) { }
+    }
+
+    static diagBufPush(line) {
+        this.trace(line.indexOf("[HomeSwiper] ") === 0 ? line.slice(13) : line);
+    }
+
+    /* 重要事件：进缓冲 + 立刻上报（两个开关都关时完全静默） */
+    static diag(msg) {
+        if (this.DEBUG_BADGE || this.DIAG_TO_SERVER) {
+            try { console.info("[HomeSwiper] " + msg); } catch (err) { }
+        }
+        this.trace(msg);
+        this.flushDiag();
+    }
+
+    /* 失败快照：写进 localStorage（跨会话保留）+ 立刻上报，成功不会抹掉，方便事后回看现场 */
+    static fail(reason) {
+        try {
+            this.diagBuf = this.diagBuf || [];
+            this.failInfo = {
+                at: new Date().toISOString(),
+                reason: String(reason || ""),
+                hash: String(location.hash || ""),
+                ua: (navigator.userAgent || "").slice(0, 300),
+                vw: String(window.innerWidth || 0) + "x" + String(window.innerHeight || 0),
+                log: this.diagBuf.slice(-50).join("\n")
+            };
+            this.lsSet("CACHE|hsFail", JSON.stringify(this.failInfo));
+            if (this.DEBUG_BADGE || this.DIAG_TO_SERVER) {
+                try { console.warn("[HomeSwiper] FAIL: " + this.failInfo.reason); } catch (err) { }
+            }
+        } catch (err) { }
+        this.flushDiag(true);
+    }
+
+    static flushDiag(force) {
+        try {
+            if (!this.DIAG_TO_SERVER) return;
+            if (this.diagTimer) {
+                if (!force) return;
+                clearTimeout(this.diagTimer);
+                this.diagTimer = null;
+            }
+            const send = function () {
+                this.diagTimer = null;
+                try {
+                    const userId = ApiClient.getCurrentUserId();
+                    if (!userId) return;
+                    /* 失败快照优先用本次会话的，其次用 localStorage 里上一次失败的（跨会话保留） */
+                    let fi = this.failInfo;
+                    if (!fi) {
+                        try { fi = JSON.parse(this.lsGet("CACHE|hsFail") || "null"); }
+                        catch (err) { fi = null; }
+                    }
+                    fi = fi || {};
+                    const prefs = {
+                        sess: String(this.bootAt || ""),
+                        at: new Date().toISOString(),
+                        ua: (navigator.userAgent || "").slice(0, 400),
+                        vw: String(window.innerWidth || 0) + "x" + String(window.innerHeight || 0),
+                        ls: String(this.lsProbe()),
+                        log: (this.diagBuf || []).slice(-40).join("\n"),
+                        failAt: String(fi.at || ""),
+                        failReason: String(fi.reason || ""),
+                        failHash: String(fi.hash || ""),
+                        failVW: String(fi.vw || ""),
+                        failLog: String(fi.log || "")
+                    };
+                    const p = ApiClient.ajax({
+                        type: "POST",
+                        url: ApiClient.getUrl("DisplayPreferences/homeswiper-diag", { userId: userId, client: "homeswiper-diag" }),
+                        data: JSON.stringify({ Id: "homeswiper-diag", Client: "homeswiper-diag", CustomPrefs: prefs }),
+                        contentType: "application/json"
+                    });
+                    if (p && p.then) p.then(null, function () { });
+                } catch (err) { }
+            }.bind(this);
+            if (force) send();
+            else this.diagTimer = setTimeout(send, 2500);
+        } catch (err) { }
+    }
+
+    /* 页面右下角兜底提示（排查期用，稳定后把 start() 里的 DEBUG_BADGE 改成 false） */
+    static showFailBadge(reason) {
+        try {
+            if (!this.DEBUG_BADGE) return;
+            let el = document.getElementById("homeSwiperDebugBadge");
+            if (!el) {
+                el = document.createElement("div");
+                el.id = "homeSwiperDebugBadge";
+                el.style.cssText = "position:fixed;z-index:999999;right:8px;bottom:80px;max-width:70vw;max-height:40vh;overflow:auto;background:rgba(0,0,0,.78);color:#ff9b9b;font-size:11px;line-height:1.45;padding:6px 8px;border-radius:6px;white-space:pre-wrap;pointer-events:none;";
+                document.body && document.body.appendChild(el);
+            }
+            el.textContent = "HomeSwiper 未挂载: " + (reason || "") + "\n" + (navigator.userAgent || "") + "\n" + (this.diagBuf || []).slice(-8).join("\n");
+            el.style.display = "block";
+        } catch (err) { }
+    }
+
+    static hideFailBadge() {
+        try {
+            const el = document.getElementById("homeSwiperDebugBadge");
+            el && (el.style.display = "none");
+        } catch (err) { }
+    }
+
+    /* ==================== 首页识别 / 挂载调度 ==================== */
+
+    static isHomeView(v) {
+        if (!v || !v.querySelector) return false;
+        try {
+            if (v.getAttribute && v.getAttribute("data-type") === "home") return true;
+            if (v.querySelector(".homeSectionsContainer")) return true;
+            const c = v.controller && v.controller.constructor && v.controller.constructor.name;
+            if (c === "HomeView") return true;
+        } catch (err) { }
+        return false;
+    }
+
+    static isHiddenView(v) {
+        try {
+            return !!(v && v.classList && v.classList.contains("hide"));
+        } catch (err) { return true; }
+    }
+
+    /* banner 是否存在且“健康”（DOM 在 + Swiper 实例在） */
+    static hasBanner(v) {
+        try {
+            const el = v && v.querySelector ? v.querySelector(".mySwiper-main") : null;
+            return !!(el && el.swiper);
+        } catch (err) { return false; }
+    }
+
+    /* 只认“当前可见”的首页视图，隐藏的（进详情页后仍留在 DOM 里的那份）不算，
+       否则心跳会在详情页把隐藏的 banner 当“高度为 0”反复重挂 */
+    static getHomeView() {
+        try {
+            const views = document.querySelectorAll(".view:not(.hide)");
+            for (let i = views.length - 1; i >= 0; i--) {
+                const v = views[i];
+                if (!v.querySelector(".homeSectionsContainer")) continue;
+                if (v.getAttribute("data-type") === "home" || this.isHomeView(v)) return v;
+            }
+            const hs = document.querySelector(".homeSectionsContainer");
+            if (hs && hs.closest) {
+                const v = hs.closest(".view");
+                if (v && !this.isHiddenView(v)) return v;
+            }
+        } catch (err) { }
+        return null;
+    }
+
+    static ensureStyles() {
+        try {
+            !document.getElementById("SwiperCss") && CommonUtils.loadExtastyle(this.SwiperCss, 'SwiperCss');
+            !document.getElementById("customCss") && CommonUtils.loadExtastyle(this.customCss, 'customCss');
+        } catch (err) { this.diag("ensureStyles ERROR: " + this.errText(err)); }
+    }
+
+    /* ========== 调度：常驻心跳（1s）+ 事件触发快跑 ==========
+       心跳是唯一兜底：不管客户端派不派发 viewbeforeshow/viewshow，
+       只要首页在 DOM 里且没有 banner，就会自己补挂。 */
+    static startHeartbeat() {
+        try {
+            if (this.heartbeatTimer) return;
+            this.retryDelay = 0;
+            this.nextTryAt = 0;
+            this.heartbeatTimer = setInterval(function () {
+                try { this.heartbeatTick(); } catch (err) { this.diag("heartbeat ERROR: " + this.errText(err)); }
+            }.bind(this), 1000);
+            this.heartbeatTick();
+            this.trace("heartbeat started");
+        } catch (err) {
+            this.diag("startHeartbeat ERROR: " + this.errText(err));
+        }
+    }
+
+    static heartbeatTick() {
+        const home = this.getHomeView();
+        if (!home) {
+            this.hbIdle = (this.hbIdle || 0) + 1;
+            if (this.hbIdle === 5 || this.hbIdle === 30) this.trace("heartbeat: no home view (#" + this.hbIdle + ")");
+            return;
+        }
+        this.hbIdle = 0;
+        const mainEl = home.querySelector(".mySwiper-main");
+        if (mainEl) {
+            // banner 在，但 Swiper 实例丢了（被 cloneNode / 视图被复用）→ 重挂
+            if (!mainEl.swiper) {
+                this.trace("heartbeat: banner dom without swiper instance, remount");
+                this.tryMount(home, "no-instance");
+                return;
+            }
+            if (this.swiper2 && this.swiper2 !== mainEl.swiper) { this.swiper2 = mainEl.swiper; }
+            // 高度为 0 = 挂了但看不见（样式丢了 / 初始化时容器还没尺寸）→ 先 update，多次为 0 再重挂
+            if (mainEl.clientHeight === 0) {
+                this.zeroTicks = (this.zeroTicks || 0) + 1;
+                this.layoutSynced = false;
+                this.syncSwiperLayout();
+                if (this.zeroTicks === 3) { this.trace("heartbeat: banner height 0 x3, remount"); }
+                if (this.zeroTicks >= 3 && (this.zeroRemounts || 0) < 3) {
+                    this.zeroRemounts = (this.zeroRemounts || 0) + 1;
+                    this.zeroTicks = 0;
+                    try {
+                        const sec = mainEl.closest ? mainEl.closest(".verticalSection") : mainEl;
+                        sec && sec.remove();
+                    } catch (err) { }
+                    this.tryMount(home, "zero-height");
+                }
+                return;
+            }
+            this.zeroTicks = 0;
+            if (!this.layoutSynced) { this.layoutSynced = true; this.syncSwiperLayout(); }
+            return;
+        }
+        if (this.mounting) return;
+        if (this.emptyUntil && Date.now() < this.emptyUntil) return;   // 媒体库真没内容，退避 5 分钟
+        if (Date.now() < (this.nextTryAt || 0)) return;                 // 失败后退避
+        this.trace("heartbeat: home without banner, mounting");
+        this.tryMount(home, "heartbeat");
+    }
+
+    static tryMount(home, reason) {
+        try {
+            this.mountHomeSwiper(home).then(function (ok) {
+                if (ok) {
+                    this.retryDelay = 0;
+                    this.nextTryAt = 0;
+                } else {
+                    this.retryDelay = Math.min(10000, (this.retryDelay || 500) * 2);
+                    this.nextTryAt = Date.now() + this.retryDelay;
+                    this.trace("retry in " + this.retryDelay + "ms (" + (reason || "") + ")");
+                    if (this.retryDelay >= 8000) this.fail("挂载反复失败(" + (reason || "") + ")，已退避到 " + this.retryDelay + "ms");
+                }
+            }.bind(this), function (err) {
+                this.diag("mount promise ERROR: " + this.errText(err));
+            }.bind(this));
+        } catch (err) {
+            this.diag("tryMount ERROR: " + this.errText(err));
+        }
+    }
+
+    /* 事件触发的“快跑”：立刻连试几次（不等心跳的 1s 节拍） */
+    static nudgeHome(view) {
+        try {
+            this.startHeartbeat();
+            let home = null;
+            try {
+                home = (view && view.isConnected === false) ? null : (this.isHomeView(view) ? view : this.getHomeView());
+            } catch (err) { home = null; }
+            if (!home) {
+                this.trace("nudge: no home view");
+                return;
+            }
+            if (this.hasBanner(home)) return;
+            [0, 300, 800, 1600].forEach(function (delay) {
+                setTimeout(function () {
+                    try {
+                        if (this.mounting) return;
+                        const h = this.getHomeView();
+                        if (!h || this.hasBanner(h)) return;
+                        if (this.emptyUntil && Date.now() < this.emptyUntil) return;
+                        this.tryMount(h, "nudge");
+                    } catch (err) { }
+                }.bind(this), delay);
+            }.bind(this));
+        } catch (err) {
+            this.diag("nudgeHome ERROR: " + this.errText(err));
+        }
+    }
+
+    /* 兼容旧调用点 */
+    static startWatchdog() {
+        this.startHeartbeat();
+    }
+
+    static stopTimers() {
+        try { clearInterval(this.nudgeTimer); } catch (err) { }
+        try { clearInterval(this.watchdogTimer); } catch (err) { }
+        try { clearInterval(this.heartbeatTimer); } catch (err) { }
+        this.nudgeTimer = null;
+        this.watchdogTimer = null;
+        this.heartbeatTimer = null;
+        this.hbIdle = 0;
+        this.retryDelay = 0;
+        this.nextTryAt = 0;
+    }
+
+    static destroySwipers() {
+        try {
+            (this.childSwipers || []).forEach(function (s) { try { s && s.destroy(false, false); } catch (e) { } });
+        } catch (err) { }
+        this.childSwipers = [];
+        try { this.swiper2 && this.swiper2.destroy(false, false); } catch (err) { }
+        try { this.swiper && this.swiper.destroy(false, false); } catch (err) { }
+        this.swiper2 = null;
+        this.swiper = null;
+    }
+
+    /* 唯一挂载入口：幂等 + 全异常保护 */
+    static async mountHomeSwiper(view) {
+        const home = (view && this.isHomeView(view) && view.querySelector(".homeSectionsContainer")) ? view : this.getHomeView();
+        if (!home) return false;
+        const existing = home.querySelector(".mySwiper-main");
+        if (existing) {
+            if (existing.swiper) return true;                 // 已经是好的，什么都不用做
+            /* DOM 在、Swiper 实例没了（被 cloneNode / 视图被复用）→ 清掉重挂 */
+            this.trace("mount: stale banner dom (no swiper instance), removing and remounting");
+            try {
+                const sec = existing.closest ? existing.closest(".verticalSection") : existing;
+                (sec || existing).remove();
+            } catch (err) { }
+        }
+        if (this.mounting) return false;
+        const skeleton = home.querySelector(".sections");
+        if (!skeleton || !skeleton.parentNode) return false;   // 骨架还没出来，交给心跳下一轮
+
+        this.mounting = true;
+        const t0 = Date.now();
+        try {
+            this.ensureStyles();
+            this.loadUser();
+            if (!this.loadFlag && !this.lsGet(this.libCacheKey())) {
+                this.initLoading();
+            }
+            this.diag("mount start");
+            const elem = await this.initBanner();
+
+            if (!this.Alldata) {                       // 数据没取到（网络/存储异常），下一轮重试
+                this.diag("mount retry: no data");
+                this.hideLoading();
+                return false;
+            }
+            if (!this.Alldata.length) {                // 真没内容：退避 5 分钟再试，别每秒打库
+                this.diag("mount abort: empty library");
+                this.emptyUntil = Date.now() + 300000;
+                this.hideLoading();
+                return true;
+            }
+            this.emptyUntil = 0;
+            const sections = home.querySelector(".sections");
+            if (!elem || !sections || !sections.parentNode) {
+                this.diag("mount retry: elem=" + !!elem + " sections=" + !!sections + " parent=" + !!(sections && sections.parentNode));
+                this.hideLoading();
+                return false;
+            }
+            this.removeStrayBanners(home);
+            sections.parentNode.insertBefore(elem, sections);
+            this.hideLoading();
+            this.layoutSynced = false;
+            this.initSwiper(home);
+            this.hideFailBadge();
+            this.diag("mount OK " + (Date.now() - t0) + "ms libs=" + this.Alldata.length);
+            this.startHeartbeat();
+            return true;
+        } catch (err) {
+            this.diag("mount ERROR: " + this.errText(err));
+            this.hideLoading();
+            this.fail("挂载异常: " + this.errText(err));
+            this.showFailBadge("挂载异常");
+            return false;
+        } finally {
+            this.mounting = false;
+        }
+    }
+
+    /* 只留当前首页视图里的那一份 banner；其余（旧视图/克隆节点里的）清掉 */
+    static removeStrayBanners(home) {
+        try {
+            const all = document.querySelectorAll(".mySwiper-main");
+            if (all.length < 2) return;
+            for (let i = 0; i < all.length; i++) {
+                const el = all[i];
+                if (home.contains(el)) continue;
+                const sec = el.closest ? el.closest(".verticalSection") : null;
+                this.trace("remove stray banner " + (i + 1) + "/" + all.length);
+                (sec || el).remove();
+            }
+        } catch (err) { }
+    }
+
+    static hideLoading() {
+        try {
+            const el = document.querySelector(".misty-loading");
+            if (!el) return;
+            el.style.transition = "opacity 500ms";
+            el.style.opacity = "0";
+            el.style.pointerEvents = "none";
+            setTimeout(function () {
+                const n = document.querySelector(".misty-loading");
+                n && n.remove();
+            }, 520);
+        } catch (err) { }
+    }
+
+    static childSwiper(slide) {
+        try {
+            if (!slide) return null;
+            const el = slide.querySelector ? slide.querySelector(".swiper") : null;
+            if (el && el.swiper) return el.swiper;
+            if (slide.childNodes && slide.childNodes[1] && slide.childNodes[1].swiper) return slide.childNodes[1].swiper;
+        } catch (err) { }
+        return null;
+    }
+
+    static syncSwiperLayout() {
+        const apply = function () {
+            try { this.swiper && this.swiper.update(); } catch (err) { }
+            try { this.swiper2 && this.swiper2.update(); } catch (err) { }
+        }.bind(this);
+        apply();
+        try {
+            requestAnimationFrame(function () { apply(); });
+        } catch (err) { }
+        setTimeout(apply, 300);
+        setTimeout(apply, 1200);
+    }
+
+    static bindLayoutEvents() {
+        if (this.layoutBound) return;
+        this.layoutBound = true;
+        const apply = function () { this.syncSwiperLayout(); }.bind(this);
+        window.addEventListener("resize", apply, { passive: true });
+        window.addEventListener("orientationchange", function () { setTimeout(apply, 300); }, { passive: true });
+    }
+
+    /* 返回首页走“恢复”分支：swiper 还在就重新启用，不在就重挂 */
+    static onHomeRestored(view) {
+        try {
+            this.ensureStyles();
+            this.loadUser();
+            const thumbsEl = view.querySelector(".mySwiper");
+            const mainEl = view.querySelector(".mySwiper-main");
+            this.swiper = thumbsEl && thumbsEl.swiper;
+            this.swiper2 = mainEl && mainEl.swiper;
+            if (this.swiper && this.swiper2) {
+                try { this.swiper2.enable(); } catch (err) { }
+                const child = this.childSwiper(this.swiper2.slides[this.swiper2.activeIndex]);
+                if (child && child.autoplay) { try { child.autoplay.start(); } catch (err) { } }
+                setTimeout(function () { try { Emby.Page.setTitle("每日推荐"); } catch (err) { } }, 1000);
+                this.layoutSynced = false;
+                this.syncSwiperLayout();
+                this.startHeartbeat();
+                this.diag("home restored: reuse swiper");
             } else {
-                if (this.player) { this.player.destroy(); this.player = null; }
-                let activeswiper = this.swiper2?.slides[this.swiper2.activeIndex].childNodes[1].swiper;
-                this.mutation_cssjs?.disconnect();
-                this.mutation?.disconnect();
-                this.swiper2?.disable();
-                if (activeswiper) {
-                    activeswiper.autoplay.stop();
-                    let activebannerCover = activeswiper.slides[activeswiper.activeIndex].querySelector(".banner-cover");
-                    activebannerCover.style.display = "block";
-                }
+                this.diag("home restored: swiper gone, remount");
+                this.nudgeHome(view);
+            }
+        } catch (err) {
+            this.diag("onHomeRestored ERROR: " + this.errText(err));
+            this.nudgeHome(view);
+        }
+    }
 
-                if (e.detail.type === "settings" && e.detail.title === "HeaderHomeScreen") {
+    static onLeaveHome(target, detail) {
+        /* 注意：不要停心跳 —— app 里回首页可能一个事件都不派发，心跳是最后的兜底 */
+        try { if (this.player) { this.player.destroy(); this.player = null; } } catch (err) { }
+        try {
+            const slide = this.swiper2 && this.swiper2.slides ? this.swiper2.slides[this.swiper2.activeIndex] : null;
+            const active = this.childSwiper(slide);
+            if (active) {
+                try { active.autoplay && active.autoplay.stop(); } catch (err) { }
+                try {
+                    const cover = active.slides && active.slides[active.activeIndex] ? active.slides[active.activeIndex].querySelector(".banner-cover") : null;
+                    cover && (cover.style.display = "block");
+                } catch (err) { }
+            }
+        } catch (err) { }
+        try { this.swiper2 && this.swiper2.disable(); } catch (err) { }
+        this.layoutSynced = false;
+    }
 
-                    if (!e.detail.isRestored) {
-                        let swiperLibraryAccess = localStorage.getItem(ApiClient.getCurrentUserId() + "-swiperLibraryAccess");
-                        this.user = swiperLibraryAccess ? JSON.parse(swiperLibraryAccess) : { Policy: { EnableAllFolders: true, EnabledFolders: [] } };
-                        let selectHomePhotoCarouselHtml = `
+    /* ==================== 设置页（首页轮播图设置） ==================== */
+
+    static renderSwiperSettings(view) {
+        try {
+            if (!view || view.querySelector(".folderAccessContainer")) return;
+            const selectHomePhotoCarouselHtml = `
 						<div class="verticalSection">
 
                         <div class="folderAccessContainer">
@@ -193,7 +715,7 @@ class HomeSwiper {
                             </div>
                             <div class="fieldDescription">选择要与轮播图共享的媒体库。</div>
                         </div>
-                        
+
                         <br />
                         <div>
                             <button is="emby-button" type="submit" class="userLibraryAccessForm raised button-submit block">
@@ -211,268 +733,285 @@ class HomeSwiper {
                         </div>
 						<br />
 						</div>`;
-                        var view = e.target;
-                        view.children[0].children[0].insertAdjacentHTML('afterbegin', selectHomePhotoCarouselHtml);
-                        await ApiClient.getUserViews({}, ApiClient.getCurrentUserId()).then(function (mediaFolders) {
-                            mediaFolders = mediaFolders.Items;
-                            renderMediaFolders(view, this.user, mediaFolders);
-                        }.bind(this));
+            const host = view.children && view.children[0] && view.children[0].children ? view.children[0].children[0] : null;
+            if (!host) { this.diag("settings: host not found"); return; }
+            host.insertAdjacentHTML('afterbegin', selectHomePhotoCarouselHtml);
 
-                        view.querySelector(".chkAllFolder").addEventListener("change", function () {
-                            for (var checked = this.checked, elems = view.querySelectorAll('.chkFolder'), i = 0, length = elems.length; i < length; i++)
-                                elems[i].checked = checked;
-                        });
-                        view.querySelector(".chkEnableAllFolders").checked
-                            ? view.querySelector(".folderAccessListContainer").classList.add("hide")
-                            : view.querySelector(".folderAccessListContainer").classList.remove("hide");
-                        view.querySelector(".chkEnableAllFolders").addEventListener("change", function () {
-                            this.checked
-                                ? view.querySelector(".folderAccessListContainer").classList.add("hide")
-                                : view.querySelector(".folderAccessListContainer").classList.remove("hide");
-                        });
+            ApiClient.getUserViews({}, ApiClient.getCurrentUserId()).then(function (folders) {
+                this.renderMediaFolders(view, (folders && folders.Items) || []);
+            }.bind(this)).then(null, function (err) {
+                this.diag("getUserViews ERROR: " + this.errText(err));
+            }.bind(this));
 
-                        view.querySelector(".userLibraryAccessForm").addEventListener(
-                            "click",
-                            function (e) {
-                                return (
-                                    saveUser(this, view),
-                                        e.preventDefault(),
-                                        e.stopPropagation(),
-                                        !1
-                                );
-                            }.bind(this));
-
-                        view.querySelector(".clearSwiperCacheButton").addEventListener(
-                            "click",
-                            function (e) {
-                                return (
-                                    clearSwiperCache(view),
-                                        e.preventDefault(),
-                                        e.stopPropagation(),
-                                        !1
-                                );
-                            }.bind(this));
-                    }
-                }
-            }
-
-        }.bind(this));
-        this.mutation_cssjs = new MutationObserver(async function (mutationRecoards) {
-            if (!this.flag_cssjs) {
-                this.mutation_cssjs.disconnect();
-                return;
-            }
-            let view = document.querySelector(".view:not(.hide)");
-            if (view?.controller?.constructor.name === "HomeView") {
-                for (let mutationRecoard of mutationRecoards) {
-                    if (mutationRecoard.target.classList.contains("homeSectionsContainer")) {
-                        this.mutation_cssjs.disconnect();
-                        this.flag_cssjs = false;
-                        !document.getElementById("SwiperCss") && CommonUtils.loadExtastyle(this.SwiperCss, 'SwiperCss');
-                        !document.getElementById("customCss") && CommonUtils.loadExtastyle(this.customCss, 'customCss');
-                        !localStorage.getItem('CACHE|Movies-Date') && !this.loadFlag && e.detail.contextPath.endsWith("home") && this.initLoading();
-
-                        // 同理：必须先 await 等待图片检测完毕
-                        let elem = await this.initBanner();
-                        // 获取最新的 .sections 节点
-                        let sections = mutationRecoard.target.querySelector(".sections");
-
-                        if (elem && sections && sections.parentNode) {
-                            sections.parentNode.insertBefore(elem, sections);
-                            this.loadFlag && this.fadeOut(document.querySelector(".misty-loading"), 500, () => document.querySelector(".misty-loading").remove());
-                            this.initSwiper(view);
-                        } else {
-                            this.loadFlag && this.fadeOut(document.querySelector(".misty-loading"), 500, () => document.querySelector(".misty-loading").remove());
-                            document.getElementById("customCss")?.remove();
-                            document.getElementById("SwiperCss")?.remove();
-                        }
-                        break;
-                    }
-                }
-            }
-
-        }.bind(this));
-
-        this.mutation_cssjs.observe(document.body, {
-            attributes: true,
-            childList: true,
-            characterData: true,
-            subtree: true,
-        });
-
-    }
-
-    /* 插入Loading */
-    static async initLoading() {
-        this.loadFlag = true;
-        const load = `
-			<div class="misty-loading">
-				<h1></h1>
-				<div class="mdl-spinner"><div class="mdl-spinner__layer mdl-spinner__layer-1"><div class="mdl-spinner__circle-clipper mdl-spinner__left"><div class="mdl-spinner__circle mdl-spinner__circleLeft"></div></div><div class="mdl-spinner__circle-clipper mdl-spinner__right"><div class="mdl-spinner__circle mdl-spinner__circleRight"></div></div></div></div>
-			</div>
-			`;
-        document.body.insertAdjacentHTML('beforeend', load);
-        const serverName = await ApiClient.serverName();
-        let loading = document.querySelector(".misty-loading h1");
-        loading && (loading.innerText = serverName, loading.setAttribute("title", serverName), loading.classList.add("active"));
-
-    }
-    static async playlistener() {
-        const playbackmanager = (await require(["playbackManager"]))[0];
-        document.querySelectorAll(".view:not(.hide) .banner-item-play").forEach(async (dom, i) => {
-            let id = dom.getAttribute("id");
-            let parentid = dom.getAttribute("data-parentid");
-            const detail = this.Alldata.filter(m => m.Id === parentid)[0].data.filter(m => m.Id === id)[0];
-            dom.addEventListener("click", () => {
-                let resume = {
-                    startPositionTicks: detail.UserData["PlaybackPositionTicks"], ids: detail.Id, serverId: detail.ServerId, items: [detail]
-                };
-                playbackmanager.play(resume);
+            const chkAll = view.querySelector(".chkAllFolder");
+            chkAll && chkAll.addEventListener("change", function () {
+                const checked = this.checked;
+                Array.prototype.forEach.call(view.querySelectorAll(".chkFolder"), function (el) { el.checked = checked; });
             });
-        });
+            const chkEnableAll = view.querySelector(".chkEnableAllFolders");
+            const list = view.querySelector(".folderAccessListContainer");
+            if (chkEnableAll && list) {
+                chkEnableAll.checked ? list.classList.add("hide") : list.classList.remove("hide");
+                chkEnableAll.addEventListener("change", function () {
+                    this.checked ? list.classList.add("hide") : list.classList.remove("hide");
+                });
+            }
+            const saveBtn = view.querySelector(".userLibraryAccessForm");
+            saveBtn && saveBtn.addEventListener("click", function (ev) {
+                ev && ev.preventDefault();
+                ev && ev.stopPropagation();
+                HomeSwiper.saveUser(view);
+            });
+            const clearBtn = view.querySelector(".clearSwiperCacheButton");
+            clearBtn && clearBtn.addEventListener("click", function (ev) {
+                ev && ev.preventDefault();
+                ev && ev.stopPropagation();
+                HomeSwiper.clearSwiperCache(view);
+            });
+        } catch (err) {
+            this.diag("renderSwiperSettings ERROR: " + this.errText(err));
+        }
     }
 
-    // 分批检测图片宽度并筛选出符合条件的影片（加入超时保护，防止死链卡死页面）
+    static saveUser(page) {
+        try {
+            const user = this.user || this.loadUser();
+            const chkAll = page.querySelector(".chkEnableAllFolders");
+            user.Policy.EnableAllFolders = !!(chkAll && chkAll.checked);
+            user.Policy.EnabledFolders = user.Policy.EnableAllFolders
+                ? (user.Policy.EnabledFolders && user.Policy.EnabledFolders.length ? user.Policy.EnabledFolders : [])
+                : Array.prototype.filter.call(page.querySelectorAll(".chkFolder"), function (c) { return c.checked; }).map(function (c) { return c.getAttribute("data-id"); });
+            this.lsSet(ApiClient.getCurrentUserId() + "-swiperLibraryAccess", JSON.stringify(user));
+            this.refreshLibItems(this.libCacheKey()).then(null, function () { });
+            require(["toast"], function (t) { t("已保存"); });
+        } catch (err) {
+            this.diag("saveUser ERROR: " + this.errText(err));
+        }
+    }
+
+    static clearSwiperCache(page) {
+        try {
+            const suffix = ApiClient.getCurrentUserId() + "-" + ApiClient.serverId();
+            this.lsRemove(this.libCacheKey());
+            this.lsRemove("CACHE|Movies-Date");
+            try {
+                Object.keys(window.sessionStorage)
+                    .filter(function (key) { return key.indexOf("CACHE|getItems_v2") === 0 && key.indexOf(suffix) !== -1; })
+                    .forEach(function (key) { HomeSwiper.ssRemove(key); });
+            } catch (err) { }
+            this.loadFlag = false;
+            this.cacheRefreshFlag = false;
+            this.Alldata = null;
+            this.emptyUntil = 0;
+            this.retryDelay = 0;
+            this.nextTryAt = 0;
+            const mounted = document.querySelector(".mySwiper-main");
+            const section = mounted && mounted.closest ? mounted.closest(".verticalSection") : null;
+            section && section.remove();
+            require(["toast"], function (t) { t("缓存已清除，返回首页将重新获取影片"); });
+            this.diag("cache cleared");
+        } catch (err) {
+            this.diag("clearSwiperCache ERROR: " + this.errText(err));
+        }
+    }
+
+    static renderMediaFolders(page, mediaFolders) {
+        try {
+            const policy = (this.user && this.user.Policy) || { EnableAllFolders: true, EnabledFolders: [] };
+            const enabled = policy.EnabledFolders || [];
+            let html = '<div class="checkboxListLabel"><label><h3 style="margin: 0 10px 0 0;">媒体库全选</h3><input type="checkbox" is="emby-checkbox" class="chkAllFolder"><span style="font-size: .7em;"><h3 style="margin:0;"></h3></span></label></div><div class="checkboxLists">';
+            for (let i = 0; i < mediaFolders.length; i++) {
+                const folder = mediaFolders[i] || {};
+                const folderId = folder.Guid || folder.Id;
+                const isChecked = (enabled.length === 0 && policy.EnableAllFolders) || enabled.indexOf(folderId) !== -1;
+                html += '<div class="checkboxList" style="margin:0 0 1.5em;">'
+                    + '<label><input type="checkbox" is="emby-checkbox" class="chkFolder" data-id="' + folderId + '" ' + (isChecked ? ' checked="checked"' : "") + '><span><h3 style="margin:0;">' + (folder.Name || "") + '</h3></span></label>'
+                    + '</div>';
+            }
+            html += "</div>";
+            const target = page.querySelector(".folderAccess");
+            if (target) target.innerHTML = html;
+            const chk = page.querySelector(".chkEnableAllFolders");
+            if (chk) chk.checked = !!policy.EnableAllFolders;
+        } catch (err) {
+            this.diag("renderMediaFolders ERROR: " + this.errText(err));
+        }
+    }
+
+    /* ==================== 数据 ==================== */
+
+    /* 手机/WebView 上把图片探测的预算收紧，避免首页被 3s×N 的超时拖死 */
+    static isMobileClient() {
+        try {
+            const ua = navigator.userAgent || "";
+            return /Android|iPhone|iPad|iPod|Mobile|; wv/i.test(ua) || (window.innerWidth || 0) < 800;
+        } catch (err) { return false; }
+    }
+
     static async filterItemsByImageWidth(items, collectionType, requiredCount) {
-        const shuffled = this.getRandomArrayElements(items, items.length);
-        const checkImage = (item) => {
-            return new Promise((resolve) => {
-                let options = collectionType === "homevideos" ? this.coverOptions : this.backdropOptions;
-                let imageUrl = this.getImageUrl(item, options);
-                if (!imageUrl) return resolve({ item, valid: false });
+        try {
+            if (!items || !items.length) return [];
+            const mobile = this.isMobileClient();
+            const minWidth = mobile ? 1000 : 2000;
+            const probeTimeout = mobile ? 1500 : 3000;
+            const batchSize = mobile ? 6 : 10;
+            const maxProbe = mobile ? Math.min(items.length, 24) : items.length;
 
-                let img = new Image();
-                // 设置3秒超时，防止图片加载过慢导致无法进入首页
-                let timeout = setTimeout(() => {
-                    img.src = ""; // 中断请求
-                    resolve({ item, valid: false });
-                }, 3000);
+            const shuffled = this.getRandomArrayElements(items, maxProbe);
+            const checkImage = (item) => {
+                return new Promise((resolve) => {
+                    let imageUrl = null;
+                    try {
+                        const options = collectionType === "homevideos" ? this.coverOptions : this.backdropOptions;
+                        imageUrl = this.getImageUrl(item, options);
+                    } catch (err) { imageUrl = null; }
+                    if (!imageUrl) return resolve({ item: item, valid: false });
 
-                // 设置宽度 >= 2000 像素才合格
-                img.onload = () => {
-                    clearTimeout(timeout);
-                    resolve({ item, valid: img.width >= 2000 });
-                };
-                img.onerror = () => {
-                    clearTimeout(timeout);
-                    resolve({ item, valid: false });
-                };
-                img.src = imageUrl;
-            });
-        };
+                    let img = new Image();
+                    let done = false;
+                    const finish = (valid) => {
+                        if (done) return;
+                        done = true;
+                        clearTimeout(timer);
+                        resolve({ item: item, valid: valid });
+                    };
+                    const timer = setTimeout(() => {
+                        try { img.src = ""; } catch (err) { }
+                        finish(false);
+                    }, probeTimeout);
+                    img.onload = () => {
+                        const w = img.naturalWidth || img.width || 0;
+                        finish(w >= minWidth);
+                    };
+                    img.onerror = () => finish(false);
+                    img.src = imageUrl;
+                });
+            };
 
-        let validItems = [];
-        // 每批 10 个并发检测
-        for (let i = 0; i < shuffled.length; i += 10) {
-            const batch = shuffled.slice(i, i + 10);
-            const results = await Promise.all(batch.map(checkImage));
-            for (const res of results) {
-                if (res.valid && !validItems.includes(res.item)) {
-                    validItems.push(res.item);
+            let validItems = [];
+            for (let i = 0; i < shuffled.length; i += batchSize) {
+                const batch = shuffled.slice(i, i + batchSize);
+                const results = await Promise.all(batch.map(checkImage));
+                for (let k = 0; k < results.length; k++) {
+                    if (results[k].valid && validItems.indexOf(results[k].item) === -1) validItems.push(results[k].item);
+                    if (validItems.length >= requiredCount) break;
                 }
                 if (validItems.length >= requiredCount) break;
             }
-            if (validItems.length >= requiredCount) break;
-        }
-
-        // 补充机制：如果候选池合格不足，再用其他的补齐直到满足最大影片数量
-        if (validItems.length < requiredCount) {
-            for (let i = 0; i < shuffled.length && validItems.length < requiredCount; i++) {
-                if (!validItems.includes(shuffled[i])) {
-                    validItems.push(shuffled[i]);
+            /* 合格数量不够就用其他条目补齐，保证首页一定有内容 */
+            if (validItems.length < requiredCount) {
+                for (let i = 0; i < shuffled.length && validItems.length < requiredCount; i++) {
+                    if (validItems.indexOf(shuffled[i]) === -1) validItems.push(shuffled[i]);
                 }
             }
+            return validItems;
+        } catch (err) {
+            this.diag("filterItemsByImageWidth ERROR: " + this.errText(err));
+            return items || [];
         }
-        return validItems;
     }
 
     static async getItems(query) {
-        // 更新缓存KEY添加_v2后缀，强制抛弃旧缓存，解决串数据问题
         let cacheKey = "CACHE|getItems_v2" + (query.ParentId ? query.ParentId : '') + ApiClient.getCurrentUserId() + "-" + ApiClient.serverId();
-        if (!sessionStorage.getItem(cacheKey)) {
-            const data = JSON.stringify(await ApiClient.getItems(ApiClient.getCurrentUserId(), query));
-            sessionStorage.setItem(cacheKey, data);
+        const cached = this.ssGet(cacheKey);
+        if (cached) {
+            try { return JSON.parse(cached); }
+            catch (err) { this.ssRemove(cacheKey); }
         }
-        return JSON.parse(sessionStorage.getItem(cacheKey));
+        const data = await ApiClient.getItems(ApiClient.getCurrentUserId(), query);
+        this.ssSet(cacheKey, JSON.stringify(data));
+        return data;
     }
 
+    /* 有缓存立刻用（跨天的后台刷新），没缓存才阻塞拉取 */
     static async getLibItems(refreshFlag) {
-        // 更新缓存KEY添加_v2后缀
-        let cacheKey = "CACHE|getLibItems_v2" + ApiClient.getCurrentUserId() + "-" + ApiClient.serverId();
-        if (refreshFlag || !localStorage.getItem(cacheKey)) {
-            this.cacheRefreshFlag = false;
-            let libdata = await ApiClient.getUserViews({}, ApiClient.getCurrentUserId());
-            let libdataitem = this.user.Policy.EnableAllFolders ? libdata.Items : libdata.Items.filter(m => this.user.Policy.EnabledFolders.includes(m.Guid));
-            let Alldata = [];
-            for (let i = 0; i < libdataitem.length; ++i) {
-                let libitem = libdataitem[i]
-                if (libitem.CollectionType && libitem.CollectionType === "homevideos") {
-                    this.itemQuery.ImageTypes = "Primary";
-                } else {
-                    this.itemQuery.ImageTypes = "Backdrop";
-                }
-                this.itemQuery.ParentId = libitem.Id;
-                let dataquery = await this.getItems(this.itemQuery);
-
-                // 修复问题1：将这里的“查询结果为空的媒体库，随机全库”兜底代码注释掉了。
-                // 以前当某个媒体库获取不到内容时，会忽略 ParentId 从整个 Emby 请求数据，导致数据互串。
-                /*
-                if (dataquery.Items.length === 0) {
-                    dataquery = await this.getItems({
-                        ImageTypes: "Backdrop", EnableImageTypes: "Primary,Backdrop,Banner,Logo",
-                        IncludeItemTypes: "Movie,Series", SortBy: "Random",
-                        Recursive: true, ImageTypeLimit: 1, Limit: this.itemQuery.Limit, Fields: "Taglines,Overview",
-                        EnableUserData: true, EnableTotalRecordCount: false
-                    });
-                }
-                */
-
-                // 执行异步过滤
-                if (dataquery.Items.length > 0) {
-                    dataquery.Items = await this.filterItemsByImageWidth(dataquery.Items, libitem.CollectionType, this.showItemNum);
-                }
-
-                dataquery.Items.length !== 0 &&
-                Alldata.push({ Id: libitem.Id, Name: libitem.Name, ImageTags: libitem.ImageTags, CollectionType: libitem.CollectionType, data: dataquery.Items });
-            }
-            const data = JSON.stringify(Alldata);
-            localStorage.setItem(cacheKey, data);
-            require(["datetime"], function (datetime) {
-                localStorage.setItem('CACHE|Movies-Date', datetime.toLocaleDateString(new Date(), { dateStyle: "short" }))
-            });
-        } else {
-            require(["datetime"], function (datetime) {
-                if (localStorage.getItem('CACHE|Movies-Date') !== datetime.toLocaleDateString(new Date(), { dateStyle: "short" })) {
-                    this.cacheRefreshFlag = true;
-                }
-            }.bind(this));
+        const cacheKey = this.libCacheKey();
+        let cached = null;
+        const raw = this.lsGet(cacheKey);
+        if (raw) {
+            try { cached = JSON.parse(raw); }
+            catch (err) { cached = null; this.lsRemove(cacheKey); }
         }
-        return JSON.parse(localStorage.getItem(cacheKey));
+        if (!refreshFlag && cached && cached.length) {
+            if (this.lsGet('CACHE|Movies-Date') !== this.todayKey()) {
+                this.cacheRefreshFlag = true;
+                this.refreshLibItems(cacheKey).then(null, function () { });
+            }
+            return cached;
+        }
+        return await this.refreshLibItems(cacheKey);
     }
+
+    static async refreshLibItems(cacheKey) {
+        try {
+            const userId = ApiClient.getCurrentUserId();
+            const libdata = await ApiClient.getUserViews({}, userId);
+            const policy = (this.user && this.user.Policy) || { EnableAllFolders: true, EnabledFolders: [] };
+            const enabled = policy.EnabledFolders || [];
+            const all = (libdata && libdata.Items) || [];
+            const libdataitem = policy.EnableAllFolders ? all : all.filter(function (m) { return enabled.indexOf(m.Guid || m.Id) !== -1; });
+
+            const Alldata = [];
+            for (let i = 0; i < libdataitem.length; ++i) {
+                const libitem = libdataitem[i];
+                try {
+                    this.itemQuery.ImageTypes = libitem.CollectionType === "homevideos" ? "Primary" : "Backdrop";
+                    this.itemQuery.ParentId = libitem.Id;
+                    const dataquery = await this.getItems(this.itemQuery);
+                    if (!dataquery || !dataquery.Items || dataquery.Items.length === 0) continue;
+                    dataquery.Items = await this.filterItemsByImageWidth(dataquery.Items, libitem.CollectionType, this.showItemNum);
+                    if (!dataquery.Items.length) continue;
+                    Alldata.push({
+                        Id: libitem.Id,
+                        Name: libitem.Name,
+                        ImageTags: libitem.ImageTags,
+                        CollectionType: libitem.CollectionType,
+                        data: dataquery.Items
+                    });
+                } catch (err) {
+                    this.diag("lib '" + libitem.Name + "' failed: " + this.errText(err));
+                }
+            }
+            if (Alldata.length) {
+                this.lsSet(cacheKey, JSON.stringify(Alldata));
+                this.lsSet('CACHE|Movies-Date', this.todayKey());
+            }
+            return Alldata;
+        } catch (err) {
+            this.diag("refreshLibItems ERROR: " + this.errText(err));
+            return null;
+        }
+    }
+
     static getImageUrl(item, options) {
-        var imgUrl, width = options.maxWidth, imageTags = item.ImageTags, adjustForPixelRatio = options.adjustForPixelRatio;
-        return options.type == "Thumb" && imageTags && imageTags.Thumb ? (imgUrl = ApiClient.getImageUrl(item.Id, {
-                type: "Thumb", maxWidth: width, tag: imageTags.Thumb, adjustForPixelRatio: adjustForPixelRatio
-            })
-        ) : options.type == "Banner" && imageTags && imageTags.Banner ? (imgUrl = ApiClient.getImageUrl(item.Id, {
-                type: "Banner", maxWidth: width, tag: imageTags.Banner, adjustForPixelRatio: adjustForPixelRatio
-            })
-        ) : options.type == "Logo" && imageTags && imageTags.Logo ? (imgUrl = ApiClient.getImageUrl(item.Id, {
-                type: "Logo", maxWidth: width, tag: imageTags.Logo, adjustForPixelRatio: adjustForPixelRatio
-            })
-        ) : options.type == "Backdrop" && item.BackdropImageTags && item.BackdropImageTags.length ? (imgUrl = ApiClient.getImageUrl(item.Id, {
-                type: "Backdrop", maxWidth: width, tag: item.BackdropImageTags[0], adjustForPixelRatio: adjustForPixelRatio
-            })
-        ) : options.type == "Primary" && imageTags && imageTags.Primary ? (imgUrl = ApiClient.getImageUrl(item.Id, {
-                type: "Primary", maxWidth: width, tag: imageTags.Primary, adjustForPixelRatio: adjustForPixelRatio
-            })
-        ) : item.BackdropImageTags && item.BackdropImageTags.length && (imgUrl = ApiClient.getImageUrl(item.Id, {
-                type: "Backdrop", maxWidth: width, tag: item.BackdropImageTags[0], adjustForPixelRatio: adjustForPixelRatio
-            })
-        ), imgUrl
+        try {
+            var imgUrl, width = options.maxWidth, imageTags = item.ImageTags || {}, adjustForPixelRatio = options.adjustForPixelRatio;
+            return options.type == "Thumb" && imageTags && imageTags.Thumb ? (imgUrl = ApiClient.getImageUrl(item.Id, {
+                    type: "Thumb", maxWidth: width, tag: imageTags.Thumb, adjustForPixelRatio: adjustForPixelRatio
+                })
+            ) : options.type == "Banner" && imageTags && imageTags.Banner ? (imgUrl = ApiClient.getImageUrl(item.Id, {
+                    type: "Banner", maxWidth: width, tag: imageTags.Banner, adjustForPixelRatio: adjustForPixelRatio
+                })
+            ) : options.type == "Logo" && imageTags && imageTags.Logo ? (imgUrl = ApiClient.getImageUrl(item.Id, {
+                    type: "Logo", maxWidth: width, tag: imageTags.Logo, adjustForPixelRatio: adjustForPixelRatio
+                })
+            ) : options.type == "Backdrop" && item.BackdropImageTags && item.BackdropImageTags.length ? (imgUrl = ApiClient.getImageUrl(item.Id, {
+                    type: "Backdrop", maxWidth: width, tag: item.BackdropImageTags[0], adjustForPixelRatio: adjustForPixelRatio
+                })
+            ) : options.type == "Primary" && imageTags && imageTags.Primary ? (imgUrl = ApiClient.getImageUrl(item.Id, {
+                    type: "Primary", maxWidth: width, tag: imageTags.Primary, adjustForPixelRatio: adjustForPixelRatio
+                })
+            ) : item.BackdropImageTags && item.BackdropImageTags.length && (imgUrl = ApiClient.getImageUrl(item.Id, {
+                    type: "Backdrop", maxWidth: width, tag: item.BackdropImageTags[0], adjustForPixelRatio: adjustForPixelRatio
+                })
+            ), imgUrl;
+        } catch (err) {
+            return null;
+        }
     }
+
     static getRandomArrayElements(arr, count) {
-        var shuffled = arr.slice(0), i = arr.length, min = i - count, temp, index;
+        var shuffled = arr.slice(0), i = arr.length, min = Math.max(0, i - count), temp, index;
         while (i-- > min) {
             index = Math.floor((i + 1) * Math.random());
             temp = shuffled[index];
@@ -481,8 +1020,9 @@ class HomeSwiper {
         }
         return shuffled.slice(min);
     }
+
     static fadeOut(elemt, speed, callback) {
-        if (elemt?.style.opacity == 1 || elemt?.style.opacity == "") {
+        if (elemt && elemt.style && (elemt.style.opacity == 1 || elemt.style.opacity == "")) {
             elemt.style.transition = `opacity ${speed}ms`;
             elemt.style.opacity = '0';
             setTimeout(function () {
@@ -492,75 +1032,106 @@ class HomeSwiper {
             }, speed);
         }
     }
-    static showVideoOverlay(swiper) {
-        if (this.player) { this.player.destroy(); this.player = null; }
-        let bannerCover = swiper.slides[swiper.activeIndex].querySelector(".banner-cover");
-        let videoContainer = swiper.slides[swiper.activeIndex].querySelector(".youtubePlayerContainerSwiper");
-        console.warn("YouTube ID", videoContainer.id)
-        if (videoContainer.id !== "") {
-            try {
-                window.onYouTubeIframeAPIReadyed = function () {
-                    this.player = new YT.Player(videoContainer.querySelector("#playerSwiper"), {
-                        height: '100%', width: '100%', videoId: videoContainer.id,
-                        events: {
-                            'onReady': event => {
-                                videoContainer.querySelector(".video-mask").style.display = 'block'
-                                swiper.autoplay.stop();
-                                bannerCover.style.display = "none";
-                                event.target.playVideo();
-                            },
-                            'onStateChange': event => {
-                                if (event.data === YT.PlayerState.ENDED) {
-                                    if (this.player) { this.player.destroy(); this.player = null; }
-                                    swiper.autoplay.start();
-                                    bannerCover.style.display = "block";
-                                    videoContainer.querySelector(".video-mask").style.display = 'none'
-                                }
-                                if (event.data === YT.PlayerState.PLAYING) {
-                                    swiper.autoplay.stop();
-                                }
-                                if (event.data === YT.PlayerState.PAUSED) {
-                                }
-                            },
-                            'onError': () => {
-                                console.error(`YouTube prevented playback of '${videoContainer.id}'`);
-                                if (this.player) { this.player.destroy(); this.player = null; }
-                                swiper.autoplay.start();
-                                bannerCover.style.display = "block";
-                                videoContainer.querySelector(".video-mask").style.display = 'none'
-                            }
-                        },
-                        playerVars: {
-                            controls: 0,
-                            enablejsapi: 1,
-                            modestbranding: 1,
-                            rel: 0,
-                            autoplay: 1,
-                            showinfo: 0,
-                            fs: 0,
-                            playsinline: 1,
-                        },
-                    });
-                }.bind(this)
-                if (window.YT) {
-                    window.YT.ready(function () { window.onYouTubeIframeAPIReadyed() })
-                }
-                else {
-                    var _reason, firstScriptTag;
-                    !document.getElementById("youtubeapi") &&
-                    (((_reason = document.createElement("script")).src = "https://www.youtube.com/iframe_api"), _reason.id = "youtubeapi",
-                        (firstScriptTag = document.getElementsByTagName("script")[0]).parentNode.insertBefore(_reason, firstScriptTag), _reason.onload = function () {
-                        let isexistsyt = setInterval(() => {
-                            window.YT && (clearInterval(isexistsyt), window.YT.ready(function () { window.onYouTubeIframeAPIReadyed() }));
-                        }, 1000);
-                        setTimeout(() => clearInterval(isexistsyt), 10000);
-                    });
-                }
-            } catch (error) {
-                console.warn(error);
+
+    /* ==================== 渲染 ==================== */
+
+    static async initLoading() {
+        this.loadFlag = true;
+        try {
+            const load = `
+			<div class="misty-loading">
+				<h1></h1>
+				<div class="mdl-spinner"><div class="mdl-spinner__layer mdl-spinner__layer-1"><div class="mdl-spinner__circle-clipper mdl-spinner__left"><div class="mdl-spinner__circle mdl-spinner__circleLeft"></div></div><div class="mdl-spinner__circle-clipper mdl-spinner__right"><div class="mdl-spinner__circle mdl-spinner__circleRight"></div></div></div></div>
+			</div>
+			`;
+            document.body && document.body.insertAdjacentHTML('beforeend', load);
+            let serverName = "";
+            try { serverName = await ApiClient.serverName(); } catch (err) { }
+            const loading = document.querySelector(".misty-loading h1");
+            if (loading && serverName) {
+                loading.innerText = serverName;
+                loading.setAttribute("title", serverName);
+                loading.classList.add("active");
             }
+        } catch (err) {
+            this.diag("initLoading ERROR: " + this.errText(err));
         }
     }
+
+    static showVideoOverlay(swiper) {
+        try {
+            if (this.player) { this.player.destroy(); this.player = null; }
+            const slide = swiper && swiper.slides && swiper.slides[swiper.activeIndex];
+            if (!slide) return;
+            const bannerCover = slide.querySelector(".banner-cover");
+            const videoContainer = slide.querySelector(".youtubePlayerContainerSwiper");
+            if (!videoContainer) return;
+            const videoId = videoContainer.id;
+            if (!videoId) return;
+
+            window.onYouTubeIframeAPIReadyed = function () {
+                this.player = new YT.Player(videoContainer.querySelector("#playerSwiper"), {
+                    height: '100%', width: '100%', videoId: videoId,
+                    events: {
+                        'onReady': event => {
+                            const mask = videoContainer.querySelector(".video-mask");
+                            mask && (mask.style.display = 'block');
+                            swiper.autoplay && swiper.autoplay.stop();
+                            bannerCover && (bannerCover.style.display = "none");
+                            try { event.target.playVideo(); } catch (err) { }
+                        },
+                        'onStateChange': event => {
+                            const mask = videoContainer.querySelector(".video-mask");
+                            if (event.data === YT.PlayerState.ENDED) {
+                                if (this.player) { this.player.destroy(); this.player = null; }
+                                swiper.autoplay && swiper.autoplay.start();
+                                bannerCover && (bannerCover.style.display = "block");
+                                mask && (mask.style.display = 'none');
+                            }
+                            if (event.data === YT.PlayerState.PLAYING) {
+                                swiper.autoplay && swiper.autoplay.stop();
+                            }
+                        },
+                        'onError': () => {
+                            try { console.error(`YouTube prevented playback of '${videoId}'`); } catch (err) { }
+                            if (this.player) { this.player.destroy(); this.player = null; }
+                            swiper.autoplay && swiper.autoplay.start();
+                            bannerCover && (bannerCover.style.display = "block");
+                            const mask2 = videoContainer.querySelector(".video-mask");
+                            mask2 && (mask2.style.display = 'none');
+                        }
+                    },
+                    playerVars: {
+                        controls: 0,
+                        enablejsapi: 1,
+                        modestbranding: 1,
+                        rel: 0,
+                        autoplay: 1,
+                        showinfo: 0,
+                        fs: 0,
+                        playsinline: 1,
+                    },
+                });
+            }.bind(this);
+
+            if (window.YT) {
+                window.YT.ready(function () { window.onYouTubeIframeAPIReadyed(); });
+            } else {
+                var _reason, firstScriptTag;
+                !document.getElementById("youtubeapi") &&
+                (((_reason = document.createElement("script")).src = "https://www.youtube.com/iframe_api"), _reason.id = "youtubeapi",
+                    (firstScriptTag = document.getElementsByTagName("script")[0]).parentNode.insertBefore(_reason, firstScriptTag), _reason.onload = function () {
+                    let isexistsyt = setInterval(() => {
+                        window.YT && (clearInterval(isexistsyt), window.YT.ready(function () { window.onYouTubeIframeAPIReadyed(); }));
+                    }, 1000);
+                    setTimeout(() => clearInterval(isexistsyt), 10000);
+                });
+            }
+        } catch (err) {
+            this.diag("showVideoOverlay ERROR: " + this.errText(err));
+        }
+    }
+
     static async initBanner() {
         var element = document.createElement("div");
         element.className = "verticalSection verticalSection-cards section00 focusable emby-scrollbuttons-scroller";
@@ -579,39 +1150,37 @@ class HomeSwiper {
 					</div>
 				</div>
 			</div>`;
+
         this.Alldata = await this.getLibItems(false);
-        if (this.Alldata.length == 0) {
-            return;
-        }
+        if (!this.Alldata || this.Alldata.length === 0) return;
+
         const html = { Swiper: "", coverHtml: "" };
         for (let i = 0; i < this.Alldata.length; ++i) {
             let datas = this.Alldata[i];
             let allbackdropHtml = '';
-            let hvclass;
-            if (datas.CollectionType === "homevideos") {
-                hvclass = "homevideos";
-            }
-            else {
-                hvclass = "";
-            };
+            let hvclass = datas.CollectionType === "homevideos" ? "homevideos" : "";
             for (let j = 0; j < datas.data.length; ++j) {
                 let detail = datas.data[j];
                 let ImageUrl, videoId;
                 if (datas.CollectionType === "homevideos") {
-                    ImageUrl = await this.getImageUrl(detail, this.coverOptions);
+                    ImageUrl = this.getImageUrl(detail, this.coverOptions);
+                } else {
+                    ImageUrl = this.getImageUrl(detail, this.backdropOptions);
                 }
-                else {
-                    ImageUrl = await this.getImageUrl(detail, this.backdropOptions);
-                };
+                if (!ImageUrl) continue;
                 if (detail.RemoteTrailers && detail.RemoteTrailers.length !== 0) {
-                    videoId = new URL(detail.RemoteTrailers[0].Url).searchParams.get('v');
+                    try {
+                        videoId = new URL(detail.RemoteTrailers[0].Url).searchParams.get('v');
+                    } catch (err) {
+                        videoId = null;
+                    }
                 }
                 const backdropHtml = `
-						<div class="swiper-slide" id="${detail.Id}">			
+						<div class="swiper-slide" id="${detail.Id}">
 							<img id="${detail.Id}" data-parentid="${datas.Id}"  class="banner-cover ${hvclass}" draggable="false" loading="${j === 0 ? 'eager' : 'lazy'}" decoding="async" src="${ImageUrl}" />
                             <div class="youtubePlayerContainerSwiper" `+ (videoId ? `id="${videoId}"` : ``) + `><div id="playerSwiper"></div><div class="video-mask"></div></div>
 							`+ ((detail.ImageTags && detail.ImageTags.Logo) ? `
-							<img draggable="false" loading="${j === 0 ? 'eager' : 'lazy'}" decoding="async" class="banner-logo padded-right" src="${await this.getImageUrl(detail, this.logoOptions)}">` : ``) + `
+							<img draggable="false" loading="${j === 0 ? 'eager' : 'lazy'}" decoding="async" class="banner-logo padded-right" src="${this.getImageUrl(detail, this.logoOptions)}">` : ``) + `
 							<div class="banner-mask"></div>
 							<div class="custom padded-left">
 							<div class="title" data-swiper-parallax="-300">${detail.Name}</div>
@@ -621,7 +1190,7 @@ class HomeSwiper {
 								<button id="${detail.Id}" data-parentid="${datas.Id}" class="banner-item-play" tabindex="-1">PLAY</button><button tabindex="-1" onclick="Emby.Page.showItem('${detail.Id}')">MORE</button>
 							</div>
 						</div>
-					</div>	
+					</div>
 				`;
                 allbackdropHtml += backdropHtml;
             }
@@ -632,14 +1201,14 @@ class HomeSwiper {
 						<div class="swiper-wrapper">${allbackdropHtml}</div>
 						<div class="swiper-pagination"></div>
 						<div class="swiper-button-next swiper-child-button"></div>
-						<div class="swiper-button-prev swiper-child-button"></div>					
+						<div class="swiper-button-prev swiper-child-button"></div>
 				</div>
 			</div>`;
             const coverHtml = `
 			<div class="swiper-slide card card-hoverable focusable card-autoactive" tabindex="0" data-index="${i}">
 			<div class="cardBox cardBox-touchzoom">
 				<button type="button" data-action="link" tabindex="-1" class="itemAction cardContent-button cardContent cardImageContainer cardContent-background cardContent-bxsborder cardContent-bxsborder-fv coveredImage coveredImage-noScale cardPadder-backdrop">
-					<img draggable="false" alt=" "  loading="eager" decoding="async" class="small-banner cardImage cardImage-bxsborder-fv coveredImage coveredImage-noScale" id="${datas.Id}" src="${await this.getImageUrl(datas, this.coverOptions)}" />
+					<img draggable="false" alt=" "  loading="eager" decoding="async" class="small-banner cardImage cardImage-bxsborder-fv coveredImage coveredImage-noScale" id="${datas.Id}" src="${this.getImageUrl(datas, this.coverOptions)}" />
 				</button>
 				<div class="cardLibText">
 					<button class="itemAction textActionButton cardTextActionButton emby-button" type="button" title="${datas.Name}" tabindex="-1">${datas.Name}</button>
@@ -653,308 +1222,380 @@ class HomeSwiper {
         element.querySelector(".mySwiper .swiper-wrapper").insertAdjacentHTML('beforeend', html.coverHtml);
         return element;
     }
+
+    /* 取“属于 root 这个 swiper 自己的”子元素（分页条 / 上下按钮）。
+       先按直接子元素取，取不到再退回"closest('.swiper') === root"的过滤，和 Swiper 的 uniqueNavElements 行为一致。 */
+    static pickNavEl(root, selector) {
+        try {
+            const direct = root.querySelector(":scope > " + selector);
+            if (direct) return direct;
+        } catch (err) { }
+        try {
+            const all = root.querySelectorAll(selector);
+            for (let i = 0; i < all.length; i++) {
+                const owner = all[i].closest ? all[i].closest(".swiper") : null;
+                if (owner === root) return all[i];
+            }
+            return all[0] || null;
+        } catch (err) { return null; }
+    }
+
     static initSwiper(e) {
-        var interleaveOffset = 0.5;
-        this.swiper = new Swiper(e.querySelector(".mySwiper"), {
-            loop: true,
-            spaceBetween: 0,
-            slidesPerView: 1,
-            freeMode: true,
-            watchSlidesProgress: true,
-            breakpoints: {
-                512: {
-                    slidesPerView: 1,
-                },
-                800: {
-                    slidesPerView: 3,
-                },
-                1000: {
-                    slidesPerView: 3,
-                },
-                1320: {
-                    slidesPerView: 4,
-                },
-                2100: {
-                    slidesPerView: 5,
-                },
-                2560: {
-                    slidesPerView: 6,
-                },
-                3200: {
-                    slidesPerView: 6,
-                },
-                3520: {
-                    slidesPerView: 6,
-                },
-            },
-            on: {
-                doubleTap: function (swiper, event) {
-                    if (event.target.classList?.contains("small-banner")) {
-                        Emby.Page.showItem(event.target.id);
-                    };
-                },
-                tap: function (swiper, event) {
-                    if (event.target.classList?.contains("small-banner") && event.target.closest(".swiper-slide").classList.contains("swiper-slide-thumb-active")) {
-                        Emby.Page.showItem(event.target.id);
-                    };
-                },
-                breakpoint: function (swiper) {
+        try {
+            if (typeof Swiper === "undefined") { this.diag("initSwiper: Swiper global missing"); return; }
+            const thumbsEl = e.querySelector(".mySwiper");
+            const mainEl = e.querySelector(".mySwiper-main");
+            if (!thumbsEl || !mainEl) { this.diag("initSwiper: container missing"); return; }
+            /* 子 swiper 的标记是插在 .mySwiper-main > .swiper-wrapper 里的，
+               所以 mainEl.querySelector(".swiper-pagination") 会先命中第 1 个媒体库的分页元素
+               （原版传字符串时 Swiper 会用 uniqueNavElements 过滤，只认 closest(".swiper") === 自己的那个）。
+               这里显式取“自己的直接子元素”，永远不会抢错。 */
 
-                    if (swiper.params.slidesPerView > this.Alldata.length) {
-                        swiper.params.loop = false;
-                        swiper.wrapperEl.style["justify-content"] = "flex-end"
+            this.destroySwipers();
+            this.childSwipers = [];
+            var interleaveOffset = 0.5;
 
-                    } else {
-                        swiper.params.loop = true;
-                        swiper.wrapperEl.style["justify-content"] = "flex-start";
-                    }
-                    if (swiper.params.slidesPerView === 1) {
-
-                        document.querySelectorAll(".banner-cover").forEach(async function (element, index) {
-                            let src1 = element.getAttribute("src");
-                            if (src1.includes("Backdrop")) {
-                                let id = element.getAttribute("id");
-                                let parentid = element.getAttribute("data-parentid");
-                                let item = this.Alldata.filter(m => m.Id === parentid)[0].data.filter(m => m.Id === id)[0];
-                                let src2 = src1.replace("Backdrop", "Primary").replace(item.BackdropImageTags[0], item.ImageTags.Primary);
-                                element.setAttribute('src', src2);
-                            }
-                        }.bind(this));
-
-                    } else {
-
-                        document.querySelectorAll(".banner-cover").forEach(async function (element, index) {
-                            let src1 = element.getAttribute("src");
-                            if (src1.includes("Primary")) {
-                                let id = element.getAttribute("id");
-                                let parentid = element.getAttribute("data-parentid");
-                                let items = this.Alldata.filter(m => m.Id === parentid)[0];
-                                if (items.CollectionType !== "homevideos") {
-                                    let item = items.data.filter(m => m.Id === id)[0]
-                                    let src2 = src1.replace("Primary", "Backdrop").replace(item.ImageTags.Primary, item.BackdropImageTags[0]);
-                                    element.setAttribute('src', src2);
-                                }
-                            }
-
-                        }.bind(this));
-                    }
-                }.bind(this),
-            },
-        });
-        for (let i = 0; i < this.Alldata.length; ++i) {
-            let swiperchild = new Swiper(e.querySelector(".mySwiper" + i), {
-                direction: this.Alldata[i].CollectionType === "homevideos" ? "horizontal" : "vertical",
+            this.swiper = new Swiper(thumbsEl, {
+                loop: true,
                 spaceBetween: 0,
+                slidesPerView: 1,
+                freeMode: true,
+                watchSlidesProgress: true,
+                breakpoints: {
+                    512: { slidesPerView: 1 },
+                    800: { slidesPerView: 3 },
+                    1000: { slidesPerView: 3 },
+                    1320: { slidesPerView: 4 },
+                    2100: { slidesPerView: 5 },
+                    2560: { slidesPerView: 6 },
+                    3200: { slidesPerView: 6 },
+                    3520: { slidesPerView: 6 },
+                },
+                on: {
+                    doubleTap: function (swiper, event) {
+                        if (event && event.target && event.target.classList && event.target.classList.contains("small-banner")) {
+                            Emby.Page.showItem(event.target.id);
+                        }
+                    },
+                    tap: function (swiper, event) {
+                        if (event && event.target && event.target.classList && event.target.classList.contains("small-banner")
+                            && event.target.closest(".swiper-slide") && event.target.closest(".swiper-slide").classList.contains("swiper-slide-thumb-active")) {
+                            Emby.Page.showItem(event.target.id);
+                        }
+                    },
+                    breakpoint: function (swiper) {
+                        try {
+                            if (swiper.params.slidesPerView > (this.Alldata || []).length) {
+                                swiper.params.loop = false;
+                                swiper.wrapperEl.style["justify-content"] = "flex-end";
+                            } else {
+                                swiper.params.loop = true;
+                                swiper.wrapperEl.style["justify-content"] = "flex-start";
+                            }
+                            const covers = e.querySelectorAll(".banner-cover");
+                            Array.prototype.forEach.call(covers, function (element) {
+                                try {
+                                    let src1 = element.getAttribute("src") || "";
+                                    let id = element.getAttribute("id");
+                                    let parentid = element.getAttribute("data-parentid");
+                                    if (swiper.params.slidesPerView === 1) {
+                                        if (src1.indexOf("Backdrop") === -1) return;
+                                        const lib = (this.Alldata || []).filter(m => m.Id === parentid)[0];
+                                        const item = lib && lib.data ? lib.data.filter(m => m.Id === id)[0] : null;
+                                        if (!item || !item.ImageTags || !item.ImageTags.Primary || !item.BackdropImageTags) return;
+                                        element.setAttribute('src', src1.replace("Backdrop", "Primary").replace(item.BackdropImageTags[0], item.ImageTags.Primary));
+                                    } else {
+                                        if (src1.indexOf("Primary") === -1) return;
+                                        const lib = (this.Alldata || []).filter(m => m.Id === parentid)[0];
+                                        if (!lib || !lib.data || lib.CollectionType === "homevideos") return;
+                                        const item = lib.data.filter(m => m.Id === id)[0];
+                                        if (!item || !item.ImageTags || !item.ImageTags.Primary || !item.BackdropImageTags) return;
+                                        element.setAttribute('src', src1.replace("Primary", "Backdrop").replace(item.ImageTags.Primary, item.BackdropImageTags[0]));
+                                    }
+                                } catch (err) { }
+                            }.bind(this));
+                        } catch (err) {
+                            this.diag("breakpoint ERROR: " + this.errText(err));
+                        }
+                    }.bind(this),
+                },
+            });
+
+            for (let i = 0; i < this.Alldata.length; ++i) {
+                const childEl = e.querySelector(".mySwiper" + i);
+                if (!childEl) continue;
+                let swiperchild = new Swiper(childEl, {
+                    direction: this.Alldata[i].CollectionType === "homevideos" ? "horizontal" : "vertical",
+                    spaceBetween: 0,
+                    speed: 1000,
+                    nested: true,
+                    watchSlidesProgress: this.Alldata[i].CollectionType === "homevideos" ? false : true,
+                    pagination: {
+                        el: HomeSwiper.pickNavEl(childEl, ".swiper-pagination"),
+                        clickable: true,
+                    },
+                    navigation: {
+                        nextEl: HomeSwiper.pickNavEl(childEl, ".swiper-button-next.swiper-child-button"),
+                        prevEl: HomeSwiper.pickNavEl(childEl, ".swiper-button-prev.swiper-child-button"),
+                        disabledClass: 'my-button-disabled',
+                    },
+                    on: {
+                        progress: function (swiper) {
+                            for (var idx = 0; idx < swiper.slides.length; idx++) {
+                                var slideProgress = swiper.slides[idx].progress;
+                                var innerOffset = swiper.height * interleaveOffset;
+                                var innerTranslate = slideProgress * innerOffset;
+                                var cover = swiper.slides[idx].querySelector(".banner-cover");
+                                cover && (cover.style.transform = "translate3d(0," + innerTranslate + "px, 0)");
+                            }
+                        },
+                        touchStart: function (swiper) {
+                            for (var idx = 0; idx < swiper.slides.length; idx++) {
+                                swiper.slides[idx].style.transition = "";
+                            }
+                        },
+                        setTransition: function (swiper, speed) {
+                            for (var idx = 0; idx < swiper.slides.length; idx++) {
+                                swiper.slides[idx].style.transition = speed + "ms";
+                                const cover = swiper.slides[idx].querySelector(".banner-cover");
+                                cover && (cover.style.transition = speed + "ms");
+                            }
+                        },
+                        reachEnd: function (swiper) {
+                            if (swiper.initialized) {
+                                swiper.autoplay && swiper.autoplay.stop();
+                                this.swiper2Delay = setTimeout(() => {
+                                    this.swiper2 && this.swiper2.slideNext();
+                                }, 20e3);
+                                this.swiperDelay = setTimeout(() => {
+                                    swiper.slideTo(0);
+                                    swiper.disable();
+                                }, 21e3);
+                            }
+                        }.bind(this),
+                        slideChange: function (swiper) {
+                            try {
+                                if (swiper.slides.length !== swiper.activeIndex + 1) {
+                                    clearTimeout(this.swiperDelay);
+                                    clearTimeout(this.swiper2Delay);
+                                }
+                                const activeSlide = swiper.slides[swiper.activeIndex];
+                                const previousSlide = swiper.slides[swiper.previousIndex];
+                                const activemorebutton = activeSlide ? activeSlide.querySelectorAll(".morebutton button") : [];
+                                const previousmorebutton = previousSlide ? previousSlide.querySelectorAll(".morebutton button") : [];
+                                Array.prototype.forEach.call(activemorebutton, function (button) { button.setAttribute("tabindex", "0"); });
+                                Array.prototype.forEach.call(previousmorebutton, function (button) { button.setAttribute("tabindex", "-1"); });
+                                if (this.player) { this.player.destroy(); this.player = null; }
+                                this.showVideoOverlay(swiper);
+                            } catch (err) {
+                                this.diag("child slideChange ERROR: " + this.errText(err));
+                            }
+                        }.bind(this),
+                    },
+                    slidesPerView: 1,
+                    breakpoints: {
+                        1000: {
+                            slidesPerView: this.Alldata[i].CollectionType === "homevideos" ? 3 : 1,
+                            slidesPerGroup: this.Alldata[i].CollectionType === "homevideos" ? 3 : 1,
+                        },
+                    },
+                });
+                this.childSwipers.push(swiperchild);
+                i > 0 && swiperchild.disable();
+            }
+
+            this.swiper2 = new Swiper(mainEl, {
+                loop: true,
                 speed: 1000,
-                nested: true,
-                watchSlidesProgress: this.Alldata[i].CollectionType === "homevideos" ? false : true,
-                pagination: {
-                    el: ".swiper-pagination",
-                    clickable: true,
+                spaceBetween: 0,
+                grabCursor: true,
+                watchSlidesProgress: true,
+                keyboard: {
+                    enabled: false,
+                    onlyInViewport: true,
                 },
                 navigation: {
-                    nextEl: ".swiper-button-next.swiper-child-button",
-                    prevEl: ".swiper-button-prev.swiper-child-button",
-                    disabledClass: 'my-button-disabled',
+                    nextEl: HomeSwiper.pickNavEl(mainEl, ".swiper-button-next.swiper-main-button"),
+                    prevEl: HomeSwiper.pickNavEl(mainEl, ".swiper-button-prev.swiper-main-button"),
                 },
                 on: {
                     progress: function (swiper) {
-                        for (var i = 0; i < swiper.slides.length; i++) {
-                            var slideProgress = swiper.slides[i].progress;
-                            var innerOffset = swiper.height * interleaveOffset;
+                        for (var idx = 0; idx < swiper.slides.length; idx++) {
+                            var slideProgress = swiper.slides[idx].progress;
+                            var innerOffset = swiper.width * interleaveOffset;
                             var innerTranslate = slideProgress * innerOffset;
-                            swiper.slides[i].querySelector(".banner-cover") && (swiper.slides[i].querySelector(".banner-cover").style.transform =
-                                "translate3d(0," + innerTranslate + "px, 0)");
+                            const inner = swiper.slides[idx].querySelector(".swiper");
+                            inner && (inner.style.transform = "translate3d(" + innerTranslate + "px, 0, 0)");
                         }
                     },
                     touchStart: function (swiper) {
-                        for (var i = 0; i < swiper.slides.length; i++) {
-                            swiper.slides[i].style.transition = "";
+                        for (var idx = 0; idx < swiper.slides.length; idx++) {
+                            swiper.slides[idx].style.transition = "";
                         }
                     },
                     setTransition: function (swiper, speed) {
-                        for (var i = 0; i < swiper.slides.length; i++) {
-                            swiper.slides[i].style.transition = speed + "ms";
-                            swiper.slides[i].querySelector(".banner-cover") && (swiper.slides[i].querySelector(".banner-cover").style.transition =
-                                speed + "ms");
+                        for (var idx = 0; idx < swiper.slides.length; idx++) {
+                            swiper.slides[idx].style.transition = speed + "ms";
+                            const inner = swiper.slides[idx].querySelector(".swiper");
+                            inner && (inner.style.transition = speed + "ms");
                         }
                     },
-                    reachEnd: function (swiper) {
-                        if (swiper.initialized) {
-                            swiper.autoplay.stop();
-                            this.swiper2Delay = setTimeout(() => {
-                                this.swiper2.slideNext();
-                            }, 20e3);
-                            this.swiperDelay = setTimeout(() => {
-                                swiper.slideTo(0);
-                                swiper.disable();
-                            }, 21e3);
-
-                        }
-                    }.bind(this),
                     slideChange: function (swiper) {
-                        if (swiper.slides.length !== swiper.activeIndex + 1) {
-                            clearTimeout(this.swiperDelay);
+                        if (!swiper.initialized) return;
+                        try {
                             clearTimeout(this.swiper2Delay);
-                        }
-                        let activemorebutton = swiper.slides[swiper.activeIndex].querySelectorAll(".morebutton button");
-                        let previousmorebutton = swiper.slides[swiper.previousIndex].querySelectorAll(".morebutton button");
-                        activemorebutton.forEach((button) => {
-                            button.setAttribute("tabindex", "0");
-                        });
-                        previousmorebutton.forEach((button) => {
-                            button.setAttribute("tabindex", "-1");
-                        });
-                        if (this.player) { this.player.destroy(); this.player = null; }
-                        this.showVideoOverlay(swiper)
-
-                    }.bind(this),
-                },
-                slidesPerView: 1,
-                breakpoints: {
-                    1000: {
-                        slidesPerView: this.Alldata[i].CollectionType === "homevideos" ? 3 : 1,
-                        slidesPerGroup: this.Alldata[i].CollectionType === "homevideos" ? 3 : 1,
-                    },
-                },
-            });
-            i > 0 && swiperchild.disable();
-        }
-        this.swiper2 = new Swiper(e.querySelector(".mySwiper-main"), {
-            loop: true,
-            speed: 1000,
-            spaceBetween: 0,
-            grabCursor: true,
-            watchSlidesProgress: true,
-            keyboard: {
-                enabled: false,
-                onlyInViewport: true,
-            },
-            navigation: {
-                nextEl: ".swiper-button-next.swiper-main-button",
-                prevEl: ".swiper-button-prev.swiper-main-button",
-            },
-            on: {
-                progress: function (swiper) {
-                    for (var i = 0; i < swiper.slides.length; i++) {
-                        var slideProgress = swiper.slides[i].progress;
-                        var innerOffset = swiper.width * interleaveOffset;
-                        var innerTranslate = slideProgress * innerOffset;
-                        swiper.slides[i].querySelector(".swiper").style.transform =
-                            "translate3d(" + innerTranslate + "px, 0, 0)";
-                    }
-                },
-                touchStart: function (swiper) {
-                    for (var i = 0; i < swiper.slides.length; i++) {
-                        swiper.slides[i].style.transition = "";
-                    }
-                },
-                setTransition: function (swiper, speed) {
-                    for (var i = 0; i < swiper.slides.length; i++) {
-                        swiper.slides[i].style.transition = speed + "ms";
-                        swiper.slides[i].querySelector(".swiper").style.transition =
-                            speed + "ms";
-                    }
-                },
-                slideChange: function (swiper) {
-                    if (swiper.initialized) {
-                        clearTimeout(this.swiper2Delay);
-                        let activeSwiper = swiper.slides[swiper.activeIndex].childNodes[1].swiper;
-                        let previousSwiper = swiper.slides[swiper.previousIndex].childNodes[1].swiper;
-                        let previousmorebutton = previousSwiper.wrapperEl.querySelectorAll(".morebutton button");
-                        let activemorebutton = activeSwiper.slides[activeSwiper.activeIndex].querySelectorAll(".morebutton button");
-                        if (swiper.activeIndex !== swiper.previousIndex && previousSwiper) {
-                            previousSwiper.autoplay.stop();
-                            if (previousSwiper.realIndex + 1 !== previousSwiper.slides.length) {
-                                previousSwiper.disable();
+                            const activeSwiper = this.childSwiper(swiper.slides[swiper.activeIndex]);
+                            const previousSwiper = this.childSwiper(swiper.slides[swiper.previousIndex]);
+                            const previousmorebutton = previousSwiper && previousSwiper.wrapperEl ? previousSwiper.wrapperEl.querySelectorAll(".morebutton button") : [];
+                            const activemorebutton = activeSwiper && activeSwiper.slides && activeSwiper.slides[activeSwiper.activeIndex]
+                                ? activeSwiper.slides[activeSwiper.activeIndex].querySelectorAll(".morebutton button") : [];
+                            if (swiper.activeIndex !== swiper.previousIndex && previousSwiper) {
+                                previousSwiper.autoplay && previousSwiper.autoplay.stop();
+                                if (previousSwiper.realIndex + 1 !== previousSwiper.slides.length) {
+                                    previousSwiper.disable();
+                                }
+                                Array.prototype.forEach.call(previousmorebutton, function (button) { button.setAttribute("tabindex", "-1"); });
                             }
-                            previousmorebutton.forEach((button) => {
-                                button.setAttribute("tabindex", "-1");
-                            });
+                            if (activeSwiper) {
+                                activeSwiper.enable();
+                                if (activeSwiper.slides.length === 1) {
+                                    this.swiper2Delay = setTimeout(() => {
+                                        this.swiper2 && this.swiper2.slideNext();
+                                    }, 20e3);
+                                } else {
+                                    activeSwiper.params.autoplay = {
+                                        delay: 20e3,
+                                        disableOnInteraction: true,
+                                        stopOnLastSlide: true,
+                                    };
+                                    activeSwiper.autoplay && activeSwiper.autoplay.start();
+                                }
+                                Array.prototype.forEach.call(activemorebutton, function (button) { button.setAttribute("tabindex", "0"); });
+                                if (this.player) { this.player.destroy(); this.player = null; }
+                                this.showVideoOverlay(activeSwiper);
+                            }
+                        } catch (err) {
+                            this.diag("main slideChange ERROR: " + this.errText(err));
                         }
-                        if (activeSwiper) {
-                            activeSwiper.enable();
-                            if (activeSwiper.slides.length === 1) {
-                                this.swiper2Delay = setTimeout(() => {
-                                    this.swiper2.slideNext();
-                                }, 20e3);
-                            } else {
+                    }.bind(this),
+                    init: function (swiper) {
+                        try {
+                            const activeSwiper = this.childSwiper(swiper.slides[swiper.activeIndex]);
+                            if (activeSwiper) {
                                 activeSwiper.params.autoplay = {
                                     delay: 20e3,
                                     disableOnInteraction: true,
                                     stopOnLastSlide: true,
                                 };
-                                activeSwiper.autoplay.start();
+                                activeSwiper.autoplay && activeSwiper.autoplay.start();
+                                if (this.player) { this.player.destroy(); this.player = null; }
+                                this.showVideoOverlay(activeSwiper);
                             }
-                            activemorebutton.forEach((button) => {
-                                button.setAttribute("tabindex", "0");
-                            });
-                            if (this.player) { this.player.destroy(); this.player = null; }
-                            this.showVideoOverlay(activeSwiper);
-
+                        } catch (err) {
+                            this.diag("main init ERROR: " + this.errText(err));
                         }
-                    }
-                }.bind(this),
-                init: function (swiper) {
-                    let activeSwiper = swiper.slides[swiper.activeIndex].childNodes[1].swiper;
-                    if (activeSwiper) {
-                        activeSwiper.params.autoplay = {
-                            delay: 20e3,
-                            disableOnInteraction: true,
-                            stopOnLastSlide: true,
-                        };
-                        activeSwiper.autoplay.start();
-                        if (this.player) { this.player.destroy(); this.player = null; }
-                        this.showVideoOverlay(activeSwiper);
-                    }
-                }.bind(this),
-            },
-            pagination: {
-                el: '.swiper-pagination',
-                clickable: true,
-            },
-            thumbs: {
-                swiper: this.swiper,
-            },
-        });
-        this.initEvent();
-        if (this.cacheRefreshFlag) {
-            this.getLibItems(true);
+                    }.bind(this),
+                },
+                pagination: {
+                    el: HomeSwiper.pickNavEl(mainEl, ".swiper-pagination"),
+                    clickable: true,
+                },
+                thumbs: {
+                    swiper: this.swiper,
+                },
+            });
+
+            this.bindLayoutEvents();
+            this.syncSwiperLayout();
+            this.initEvent();
+            if (this.cacheRefreshFlag) {
+                this.getLibItems(true).then(null, function () { });
+            }
+        } catch (err) {
+            this.diag("initSwiper ERROR: " + this.errText(err));
+            this.showFailBadge("Swiper 初始化失败");
         }
     }
+
     /* 初始事件 */
     static async initEvent() {
-        var mouseoverflag = false;
-        for (let i = 0; i < this.swiper.slides.length; i++) {
-            this.swiper2.pagination.bullets.length > 0 && (this.swiper2.pagination.bullets[i].onmouseover = function () {
-                mouseoverflag = true;
-                this.click()
-            });
-            this.swiper2.pagination.bullets[i].onclick = function () {
-                !mouseoverflag && (i === this.swiper2.realIndex) && Emby.Page.showItem(this.swiper.slides[i].firstElementChild.id);
-                mouseoverflag = false;
-            }.bind(this)
-            this.swiper.slides[i].onmouseover = function () {
-                this.mouseovertimeout = setTimeout(function () {
-                    (i !== this.swiper2.realIndex) && this.swiper2.slideTo(this.swiper2.slides.findIndex(m => m.dataset.swiperSlideIndex == i));
-                }.bind(this), 300);
-            }.bind(this);
-            this.swiper.slides[i].onmouseleave = function () {
-                clearTimeout(this.mouseovertimeout);
-            }.bind(this);
-            this.swiper.slides[i].onfocus = function () {
-                this.focustimeout = setTimeout(function () {
-                    (i !== this.swiper2.realIndex) && this.swiper2.slideTo(this.swiper2.slides.findIndex(m => m.dataset.swiperSlideIndex == i));
-                }.bind(this), 100);
-            }.bind(this);
-            this.swiper.slides[i].onblur = function () {
-                clearTimeout(this.focustimeout);
-            }.bind(this);
-        }
+        try {
+            var mouseoverflag = false;
+            const bullets = (this.swiper2 && this.swiper2.pagination && this.swiper2.pagination.bullets) || [];
+            for (let i = 0; i < this.swiper.slides.length; i++) {
+                const bullet = bullets[i];
+                if (bullet) {
+                    bullet.onmouseover = function () {
+                        try { mouseoverflag = true; this.click(); } catch (err) { }
+                    };
+                    bullet.onclick = function (idx) {
+                        return function () {
+                            try {
+                                !mouseoverflag && (idx === HomeSwiper.swiper2.realIndex) && Emby.Page.showItem(HomeSwiper.swiper.slides[idx].firstElementChild.id);
+                            } catch (err) { }
+                            mouseoverflag = false;
+                        };
+                    }(i);
+                }
+                const thumbSlide = this.swiper.slides[i];
+                thumbSlide.onmouseover = function (idx) {
+                    return function () {
+                        this.mouseovertimeout = setTimeout(function () {
+                            try {
+                                if (idx !== HomeSwiper.swiper2.realIndex) HomeSwiper.swiper2.slideTo(HomeSwiper.swiper2.slides.findIndex(m => m.dataset.swiperSlideIndex == idx));
+                            } catch (err) { }
+                        }, 300);
+                    };
+                }(i);
+                thumbSlide.onmouseleave = function () { clearTimeout(this.mouseovertimeout); };
+                thumbSlide.onfocus = function (idx) {
+                    return function () {
+                        this.focustimeout = setTimeout(function () {
+                            try {
+                                if (idx !== HomeSwiper.swiper2.realIndex) HomeSwiper.swiper2.slideTo(HomeSwiper.swiper2.slides.findIndex(m => m.dataset.swiperSlideIndex == idx));
+                            } catch (err) { }
+                        }, 100);
+                    };
+                }(i);
+                thumbSlide.onblur = function () { clearTimeout(this.focustimeout); };
+            }
 
-        this.playlistener();
-        Emby.Page.setTitle("每日推荐");
+            this.playlistener();
+            try { Emby.Page.setTitle("每日推荐"); } catch (err) { }
+        } catch (err) {
+            this.diag("initEvent ERROR: " + this.errText(err));
+        }
     }
+
+    static playlistener() {
+        try {
+            require(["playbackManager"]).then(function (mods) {
+                const playbackmanager = mods[0];
+                const nodes = document.querySelectorAll(".view:not(.hide) .banner-item-play");
+                Array.prototype.forEach.call(nodes, function (dom) {
+                    const lib = (HomeSwiper.Alldata || []).filter(m => m.Id === dom.getAttribute("data-parentid"))[0];
+                    const detail = lib && lib.data ? lib.data.filter(m => m.Id === dom.getAttribute("id"))[0] : null;
+                    if (!detail) return;
+                    dom.onclick = function () {
+                        try {
+                            const resume = {
+                                startPositionTicks: (detail.UserData || {}).PlaybackPositionTicks || 0,
+                                ids: detail.Id,
+                                serverId: detail.ServerId,
+                                items: [detail]
+                            };
+                            playbackmanager.play(resume);
+                        } catch (err) { }
+                    };
+                });
+            }).then(null, function (err) {
+                HomeSwiper.diag("playlistener ERROR: " + HomeSwiper.errText(err));
+            });
+        } catch (err) {
+            this.diag("playlistener ERROR: " + this.errText(err));
+        }
+    }
+
 }
 /**
  * Swiper 11.1.14
