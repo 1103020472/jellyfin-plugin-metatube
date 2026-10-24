@@ -489,6 +489,15 @@ public class PluginConfiguration : BasePluginConfiguration
         return BackupTranslation.GetBackupRefusalPatterns();
     }
 
+    /// <summary>
+    /// 确保 OpenAI Provider 列表已完成迁移 / 规范化。
+    /// 翻译请求与设置页在读取配置前都会调用，幂等。
+    /// </summary>
+    public void EnsureTranslationProvidersMigrated()
+    {
+        Translation.EnsureProviders(BackupTranslation);
+    }
+
     /// <summary>未配置时的内置默认拒答文案。</summary>
     public static readonly string[] DefaultBackupRefusalPatterns =
     {

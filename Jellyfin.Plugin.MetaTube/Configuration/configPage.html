@@ -242,41 +242,42 @@
                         </div>
 
                         <div class="selectTranslationEngineOpenAi">
-                            <div class="inputContainer">
-                                <label class="inputLabel inputLabelUnfocused" for="txtOpenAiApiKey">OpenAI api key:</label>
-                                <input id="txtOpenAiApiKey" is="emby-input" name="txtOpenAiApiKey" type="text"/>
-                                <div class="fieldDescription"></div>
+                            <div class="verticalSection">
+                                <h3 class="sectionTitle">OpenAI Provider 列表</h3>
+                                <div class="fieldDescription">一个 Provider = 一套 OpenAI 兼容接口参数（API 地址、模型、Key、翻译组件、额外 JSON、最大 token）。翻译时选一个作为主通道。</div>
+                                <div id="translationProviderList"></div>
+                                <div style="margin: 10px 0;">
+                                    <button id="btnAddTranslationProvider" is="emby-button" type="button" class="raised button-alt">
+                                        <span>+ 新增 Provider</span>
+                                    </button>
+                                </div>
+                                <div class="fieldDescription" id="translationProviderHint"></div>
                             </div>
-                            <div class="inputContainer">
-                                <label class="inputLabel inputLabelUnfocused" for="txtOpenAiApiUrl">OpenAI api url:</label>
-                                <input id="txtOpenAiApiUrl" is="emby-input" name="txtOpenAiApiUrl" type="text"/>
-                                <div class="fieldDescription">Custom OpenAI-compatible api url. (optional)</div>
-                            </div>
-                            <div class="inputContainer">
-                                <label class="inputLabel inputLabelUnfocused" for="txtOpenAiModel">OpenAI model:</label>
-                                <input id="txtOpenAiModel" is="emby-input" name="txtOpenAiModel" type="text"/>
-                                <div class="fieldDescription">Custom OpenAI-compatible api model. (optional)</div>
-                            </div>
-                            <div class="selectContainer">
-                                <label class="selectLabel selectLabelText" for="selectOpenAiTranslator">OpenAI 翻译组件:</label>
-                                <select class="emby-select-withcolor emby-select" id="selectOpenAiTranslator" is="emby-select" name="selectOpenAiTranslator">
-                                    <option value="OpenAiTranslator">openai-translator（默认）</option>
-                                    <option value="GoOpenAi">go-openai（可配置思考度 / 最大 token）</option>
-                                </select>
-                                <div class="fieldDescription">翻译时使用的 OpenAI 客户端实现。默认 openai-translator（历史行为）；选 go-openai 后，下面的"额外参数"和"最大 token"才会生效。</div>
-                            </div>
-                            <div class="selectOpenAiTranslatorGoOpenAi" style="display: none;">
-                                <div class="inputContainer">
-                                    <label class="inputLabel inputLabelUnfocused" for="txtOpenAiExtraParams">OpenAI 额外参数 (JSON):</label>
-                                    <input id="txtOpenAiExtraParams" is="emby-input" name="txtOpenAiExtraParams" type="text"/>
-                                    <div class="fieldDescription">合并进请求体的额外 JSON 字段，仅 go-openai 生效。SiliconFlow 关闭思考：{"thinking_budget": 1}；智谱：{"thinking": {"type": "disabled"}}。</div>
+
+                            <div class="verticalSection">
+                                <h3 class="sectionTitle">场景路由</h3>
+                                <div class="selectContainer">
+                                    <label class="selectLabel selectLabelText" for="selectPrimaryProvider">主 Provider（A）:</label>
+                                    <select class="emby-select-withcolor emby-select" id="selectPrimaryProvider" is="emby-select" name="selectPrimaryProvider"></select>
+                                    <div class="fieldDescription">正常翻译使用的通道。</div>
+                                </div>
+                                <div class="selectContainer">
+                                    <label class="selectLabel selectLabelText" for="selectSensitiveFallbackProvider">敏感词备用（B）:</label>
+                                    <select class="emby-select-withcolor emby-select" id="selectSensitiveFallbackProvider" is="emby-select" name="selectSensitiveFallbackProvider"></select>
+                                    <div class="fieldDescription">A 返回拒答文案，或接口返回内容审核 / 敏感词错误时，用 B 重试一次。留空不降级。</div>
+                                </div>
+                                <div class="selectContainer">
+                                    <label class="selectLabel selectLabelText" for="selectTimeoutFallbackProvider">超时备用（C）:</label>
+                                    <select class="emby-select-withcolor emby-select" id="selectTimeoutFallbackProvider" is="emby-select" name="selectTimeoutFallbackProvider"></select>
+                                    <div class="fieldDescription">A 超时时用 C 重试一次。B 和 C 是两条独立链路；B/C 再失败会直接报错，不再继续降级。</div>
                                 </div>
                                 <div class="inputContainer">
-                                    <label class="inputLabel inputLabelUnfocused" for="txtOpenAiMaxCompletionTokens">OpenAI 最大 token:</label>
-                                    <input id="txtOpenAiMaxCompletionTokens" is="emby-input" name="txtOpenAiMaxCompletionTokens" type="number" min="0"/>
-                                    <div class="fieldDescription">单次请求最多生成的 token 数（含思维链），默认 4096，仅 go-openai 生效。</div>
+                                    <label class="inputLabel inputLabelUnfocused" for="txtSensitivePatterns">敏感词 / 拒答文案:</label>
+                                    <textarea id="txtSensitivePatterns" is="emby-textarea" name="txtSensitivePatterns" class="emby-textarea" rows="5" style="width: 100%;"></textarea>
+                                    <div class="fieldDescription">每行一条，译文包含任意一条（忽略大小写）即切到 B。留空使用默认：Sorry, I can't respond to this question</div>
                                 </div>
                             </div>
+
                             <div class="inputContainer">
                                 <label class="inputLabel inputLabelUnfocused" for="txtMaxChunkSize">OpenAI maxChunkSize:</label>
                                 <input id="txtMaxChunkSize" is="emby-input" name="txtMaxChunkSize" type="number"/>
@@ -290,64 +291,7 @@
                             <div class="inputContainer">
                                 <label class="inputLabel inputLabelUnfocused" for="txtRequestTimeoutSeconds">接口超时时间(秒):</label>
                                 <input id="txtRequestTimeoutSeconds" is="emby-input" name="txtRequestTimeoutSeconds" type="number" min="1" max="7200"/>
-                                <div class="fieldDescription">单次请求MetaTube服务端的超时时间，默认600秒(10分钟)。翻译走大模型可能耗时数分钟，改完无需重启。</div>
-                            </div>
-                            <div class="checkboxContainer checkboxContainer-withDescription">
-                                <label class="emby-checkbox-label">
-                                    <input id="chkEnableBackupTranslation" is="emby-checkbox" name="chkEnableBackupTranslation" type="checkbox"/>
-                                    <span>启用备用翻译（主通道返回拒答文案时自动切换）</span>
-                                </label>
-                                <div class="fieldDescription checkboxFieldDescription">主翻译通道返回「Sorry, I can't respond to this question」之类的拒答文案时，该次请求自动改用下方备用 OpenAI 参数重试（请求粒度切换，对上层无感）。备用通道固定走 OpenAI 兼容接口，api key 必填。</div>
-                            </div>
-                            <div id="backupTranslationSection" style="display: none;">
-                                <div class="selectContainer" style="margin-top: 0;">
-                                    <button id="btnBackupTranslationToggle" is="emby-button" type="button" class="raised button-alt" style="margin: 0;">
-                                        <span id="btnBackupTranslationToggleLabel">▶ 展开 Backup 翻译配置</span>
-                                    </button>
-                                    <div class="fieldDescription">备用通道平时不用，配置收在这里，展开后填写。</div>
-                                </div>
-                                <div id="backupTranslationFields" style="display: none;">
-                                    <div class="inputContainer">
-                                        <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiApiKey">Backup api key:</label>
-                                        <input id="txtBackupOpenAiApiKey" is="emby-input" name="txtBackupOpenAiApiKey" type="text"/>
-                                        <div class="fieldDescription"></div>
-                                    </div>
-                                    <div class="inputContainer">
-                                        <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiApiUrl">Backup api url:</label>
-                                        <input id="txtBackupOpenAiApiUrl" is="emby-input" name="txtBackupOpenAiApiUrl" type="text"/>
-                                        <div class="fieldDescription">Custom OpenAI-compatible api url. (optional)</div>
-                                    </div>
-                                    <div class="inputContainer">
-                                        <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiModel">Backup model:</label>
-                                        <input id="txtBackupOpenAiModel" is="emby-input" name="txtBackupOpenAiModel" type="text"/>
-                                        <div class="fieldDescription">Custom OpenAI-compatible api model. (optional)</div>
-                                    </div>
-                                    <div class="selectContainer">
-                                        <label class="selectLabel selectLabelText" for="selectBackupOpenAiTranslator">Backup translator:</label>
-                                        <select class="emby-select-withcolor emby-select" id="selectBackupOpenAiTranslator" is="emby-select" name="selectBackupOpenAiTranslator">
-                                            <option value="OpenAiTranslator">openai-translator（默认）</option>
-                                            <option value="GoOpenAi">go-openai（可配置思考度 / 最大 token）</option>
-                                        </select>
-                                        <div class="fieldDescription">备用通道的 OpenAI 客户端实现。选 go-openai 后，下面的"额外参数"和"最大 token"才会生效。</div>
-                                    </div>
-                                    <div class="selectBackupOpenAiTranslatorGoOpenAi" style="display: none;">
-                                        <div class="inputContainer">
-                                            <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiExtraParams">Backup 额外参数 (JSON):</label>
-                                            <input id="txtBackupOpenAiExtraParams" is="emby-input" name="txtBackupOpenAiExtraParams" type="text"/>
-                                            <div class="fieldDescription">合并进请求体的额外 JSON 字段，仅 go-openai 生效。例如 SiliconFlow：{"thinking_budget": 1}。</div>
-                                        </div>
-                                        <div class="inputContainer">
-                                            <label class="inputLabel inputLabelUnfocused" for="txtBackupOpenAiMaxCompletionTokens">Backup 最大 token:</label>
-                                            <input id="txtBackupOpenAiMaxCompletionTokens" is="emby-input" name="txtBackupOpenAiMaxCompletionTokens" type="number" min="0"/>
-                                            <div class="fieldDescription">单次请求最多生成的 token 数（含思维链），默认 4096，仅 go-openai 生效。</div>
-                                        </div>
-                                    </div>
-                                    <div class="inputContainer">
-                                        <label class="inputLabel inputLabelUnfocused" for="txtBackupRefusalPatterns">触发备用翻译的拒答文案:</label>
-                                        <textarea id="txtBackupRefusalPatterns" is="emby-textarea" name="txtBackupRefusalPatterns" class="emby-textarea" rows="5" style="width: 100%;"></textarea>
-                                        <div class="fieldDescription">每行一条，译文包含任意一条（忽略大小写）即转备用通道。留空使用默认：Sorry, I can't respond to this question</div>
-                                    </div>
-                                </div>
+                                <div class="fieldDescription">没有单独配置 Provider 超时时使用的全局超时，默认600秒(10分钟)。改完无需重启。</div>
                             </div>
                             <div class="checkboxContainer checkboxContainer-withDescription">
                                 <label class="emby-checkbox-label">
@@ -474,6 +418,60 @@
                 </div>
 
             </form>
+
+            <template id="translationProviderTemplate">
+                <div class="translation-provider-card" data-provider-id=""
+                     style="border:1px solid rgba(255,255,255,.16); border-radius:8px; padding:12px; margin:12px 0; background:rgba(255,255,255,.03);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                        <strong class="translation-provider-title">Provider</strong>
+                        <button type="button" is="emby-button" class="raised button-alt btn-remove-translation-provider">
+                            <span>删除</span>
+                        </button>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused">名称:</label>
+                        <input is="emby-input" class="emby-input p-name" type="text"/>
+                        <div class="fieldDescription">仅用于设置页与日志，例如「主力」「备用-无审查」。</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused">API 地址:</label>
+                        <input is="emby-input" class="emby-input p-api-url" type="text"/>
+                        <div class="fieldDescription">兼容 OpenAI 的接口地址；留空表示使用默认地址。</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused">API Key:</label>
+                        <input is="emby-input" class="emby-input p-api-key" type="text"/>
+                        <div class="fieldDescription">本地无鉴权的接口可以留空。</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused">模型:</label>
+                        <input is="emby-input" class="emby-input p-model" type="text"/>
+                        <div class="fieldDescription">例如 deepseek-ai/DeepSeek-V3、gpt-4o-mini；留空表示默认模型。</div>
+                    </div>
+                    <div class="selectContainer">
+                        <label class="selectLabel selectLabelText">翻译组件:</label>
+                        <select class="emby-select-withcolor emby-select p-translator" is="emby-select">
+                            <option value="OpenAiTranslator">openai-translator（默认）</option>
+                            <option value="GoOpenAi">go-openai（可配置思考度 / 最大 token）</option>
+                        </select>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused">额外参数 (JSON):</label>
+                        <textarea is="emby-textarea" class="emby-textarea p-extra-params" rows="2"></textarea>
+                        <div class="fieldDescription">仅 go-openai 生效。SiliconFlow: {"thinking_budget": 1}；智谱: {"thinking": {"type": "disabled"}}。</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused">最大生成 token:</label>
+                        <input is="emby-input" class="emby-input p-max-tokens" type="number" min="0"/>
+                        <div class="fieldDescription">含思维链，默认 4096，仅 go-openai 生效。</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused">超时（秒）:</label>
+                        <input is="emby-input" class="emby-input p-timeout" type="number" min="0" max="7200"/>
+                        <div class="fieldDescription">0 = 使用上面的全局 API 超时；A 超时后才会切到 C。</div>
+                    </div>
+                </div>
+            </template>
         </div>
     </div>
     <script type="text/javascript">
@@ -523,28 +521,238 @@
             }
         });
 
-        // 只有 go-openai 才支持额外参数 / 最大 token，所以按所选组件显示或隐藏。
-        $('#selectOpenAiTranslator').on('change', function (_) {
-            var goOpenAi = this.value === 'GoOpenAi';
-            $('.selectOpenAiTranslatorGoOpenAi').css('display', goOpenAi ? 'inherit' : 'none');
+        // ===== 翻译 Provider 列表 + 场景路由 =====
+        var TranslationProviderEditor = (function () {
+            var providers = [];
+            var templateSelector = '#translationProviderTemplate';
+
+            function newId() {
+                return 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+            }
+
+            // Jellyfin 返回的枚举通常是大写开头的名字；兼容旧配置里可能出现的数字。
+            function translatorValue(value) {
+                if (value === 1 || value === '1' || value === 'GoOpenAi') return 'GoOpenAi';
+                return 'OpenAiTranslator';
+            }
+
+            function firstDefined() {
+                for (var i = 0; i < arguments.length; i++) {
+                    if (arguments[i] !== undefined && arguments[i] !== null) return arguments[i];
+                }
+                return '';
+            }
+
+            function hasProvider(id) {
+                return providers.some(function (provider) {
+                    return provider.Id === id;
+                });
+            }
+
+            function load(config) {
+                var translation = config.Translation || {};
+                // 兼容两种序列化：嵌套的 Translation 组，以及旧版根上的扁平字段。
+                var backup = config.BackupTranslation || {};
+                providers = Array.isArray(translation.Providers) ? translation.Providers.slice() : [];
+
+                var primaryKey = firstDefined(config.OpenAiApiKey, translation.OpenAiApiKey);
+                var primaryUrl = firstDefined(config.OpenAiApiUrl, translation.OpenAiApiUrl);
+                var primaryModel = firstDefined(config.OpenAiModel, translation.OpenAiModel);
+
+                // 旧配置迁移：把原来的主通道 / 备用通道转成两个 Provider。
+                if (!translation.ProvidersInitialized && providers.length === 0) {
+                    if (primaryKey || primaryUrl || primaryModel) {
+                        providers.push({
+                            Id: 'legacy-primary',
+                            Name: '主通道（旧配置迁移）',
+                            ApiUrl: primaryUrl,
+                            ApiKey: primaryKey,
+                            Model: primaryModel,
+                            Translator: translatorValue(firstDefined(config.OpenAiTranslator, translation.OpenAiTranslator)),
+                            ExtraParams: firstDefined(config.OpenAiExtraParams, translation.OpenAiExtraParams),
+                            MaxCompletionTokens: firstDefined(config.OpenAiMaxCompletionTokens, translation.OpenAiMaxCompletionTokens, 4096),
+                            TimeoutSeconds: 0
+                        });
+                        if (!translation.PrimaryProviderId) translation.PrimaryProviderId = 'legacy-primary';
+                    }
+
+                    var backupKey = firstDefined(config.BackupOpenAiApiKey, backup.BackupOpenAiApiKey);
+                    var backupUrl = firstDefined(config.BackupOpenAiApiUrl, backup.BackupOpenAiApiUrl);
+                    var backupModel = firstDefined(config.BackupOpenAiModel, backup.BackupOpenAiModel);
+                    var backupEnabled = firstDefined(config.EnableBackupTranslation, backup.EnableBackupTranslation, false);
+
+                    if (backupEnabled && (backupKey || backupUrl || backupModel)) {
+                        providers.push({
+                            Id: 'legacy-backup',
+                            Name: '备用通道（旧配置迁移）',
+                            ApiUrl: backupUrl,
+                            ApiKey: backupKey,
+                            Model: backupModel,
+                            Translator: translatorValue(firstDefined(config.BackupOpenAiTranslator, backup.BackupOpenAiTranslator)),
+                            ExtraParams: firstDefined(config.BackupOpenAiExtraParams, backup.BackupOpenAiExtraParams),
+                            MaxCompletionTokens: firstDefined(config.BackupOpenAiMaxCompletionTokens, backup.BackupOpenAiMaxCompletionTokens, 4096),
+                            TimeoutSeconds: 0
+                        });
+                        if (!translation.SensitiveFallbackProviderId) translation.SensitiveFallbackProviderId = 'legacy-backup';
+                    }
+                }
+
+                render();
+                var primaryId = hasProvider(translation.PrimaryProviderId)
+                    ? translation.PrimaryProviderId
+                    : (providers[0] ? providers[0].Id : '');
+                $('#selectPrimaryProvider').val(primaryId);
+                $('#selectSensitiveFallbackProvider').val(
+                    hasProvider(translation.SensitiveFallbackProviderId) ? translation.SensitiveFallbackProviderId : '');
+                $('#selectTimeoutFallbackProvider').val(
+                    hasProvider(translation.TimeoutFallbackProviderId) ? translation.TimeoutFallbackProviderId : '');
+                $('#txtSensitivePatterns').val(firstDefined(config.BackupRefusalPatterns, backup.BackupRefusalPatterns));
+            }
+
+            function render() {
+                var $list = $('#translationProviderList');
+                $list.empty();
+
+                providers.forEach(function (provider) {
+                    var $card = $($(templateSelector).html());
+                    $card.attr('data-provider-id', provider.Id || newId());
+                    $card.find('.p-name').val(provider.Name || '');
+                    $card.find('.p-api-url').val(provider.ApiUrl || '');
+                    $card.find('.p-api-key').val(provider.ApiKey || '');
+                    $card.find('.p-model').val(provider.Model || '');
+                    $card.find('.p-translator').val(translatorValue(provider.Translator));
+                    $card.find('.p-extra-params').val(provider.ExtraParams || '');
+                    var maxTokens = provider.MaxCompletionTokens;
+                    $card.find('.p-max-tokens').val(maxTokens === undefined || maxTokens === null ? 4096 : maxTokens);
+                    $card.find('.p-timeout').val(provider.TimeoutSeconds || 0);
+                    $list.append($card);
+                });
+
+                refreshSelects();
+                updateHint();
+            }
+
+            function fillProviderSelect(select, selected, emptyText, primary) {
+                var $select = $(select);
+                $select.empty();
+                $select.append($('<option>').val('').text(emptyText));
+
+                providers.forEach(function (provider) {
+                    var name = provider.Name || '(未命名 Provider)';
+                    var model = provider.Model || '默认模型';
+                    $select.append($('<option>').val(provider.Id).text(name + '（' + model + '）'));
+                });
+
+                var exists = providers.some(function (provider) {
+                    return provider.Id === selected;
+                });
+                if (exists) {
+                    $select.val(selected);
+                } else if (primary && providers.length > 0) {
+                    $select.val(providers[0].Id);
+                } else {
+                    $select.val('');
+                }
+            }
+
+            function refreshSelects() {
+                // 名称 / 模型是选项显示文案的一部分：先从 DOM 同步一次，
+                // 否则刚改完名字时下拉框里还是旧名字。
+                syncFromDom();
+
+                var primary = $('#selectPrimaryProvider').val();
+                var sensitive = $('#selectSensitiveFallbackProvider').val();
+                var timeout = $('#selectTimeoutFallbackProvider').val();
+
+                fillProviderSelect('#selectPrimaryProvider', primary, '（请选择主 Provider）', true);
+                fillProviderSelect('#selectSensitiveFallbackProvider', sensitive, '（不使用 / 不降级）', false);
+                fillProviderSelect('#selectTimeoutFallbackProvider', timeout, '（不使用 / 不降级）', false);
+            }
+
+            function syncFromDom() {
+                providers = [];
+                $('#translationProviderList .translation-provider-card').each(function () {
+                    var $card = $(this);
+                    var id = $card.attr('data-provider-id');
+                    if (!id) {
+                        id = newId();
+                        $card.attr('data-provider-id', id);
+                    }
+
+                    providers.push({
+                        Id: id,
+                        Name: $card.find('.p-name').val().trim(),
+                        ApiUrl: $card.find('.p-api-url').val().trim(),
+                        ApiKey: $card.find('.p-api-key').val().trim(),
+                        Model: $card.find('.p-model').val().trim(),
+                        Translator: $card.find('.p-translator').val() || 'OpenAiTranslator',
+                        ExtraParams: $card.find('.p-extra-params').val() || '',
+                        MaxCompletionTokens: parseInt($card.find('.p-max-tokens').val(), 10) || 0,
+                        TimeoutSeconds: parseInt($card.find('.p-timeout').val(), 10) || 0
+                    });
+                });
+            }
+
+            function updateHint() {
+                $('#translationProviderHint').text(providers.length === 0
+                    ? '还没有配置 Provider。点「+ 新增 Provider」添加第一个 OpenAI 兼容通道。'
+                    : '共 ' + providers.length + ' 个 Provider。场景路由只引用 Provider.Id，改名不会影响路由。');
+            }
+
+            function add() {
+                syncFromDom();
+                providers.push({
+                    Id: newId(),
+                    Name: 'Provider ' + (providers.length + 1),
+                    ApiUrl: '',
+                    ApiKey: '',
+                    Model: '',
+                    Translator: 'OpenAiTranslator',
+                    ExtraParams: '',
+                    MaxCompletionTokens: 4096,
+                    TimeoutSeconds: 0
+                });
+                render();
+            }
+
+            function remove($button) {
+                var id = $button.closest('.translation-provider-card').attr('data-provider-id');
+                syncFromDom();
+                providers = providers.filter(function (provider) {
+                    return provider.Id !== id;
+                });
+                render();
+            }
+
+            function collect(config) {
+                syncFromDom();
+                var translation = config.Translation = config.Translation || {};
+                translation.Providers = providers;
+                translation.PrimaryProviderId = $('#selectPrimaryProvider').val() || '';
+                translation.SensitiveFallbackProviderId = $('#selectSensitiveFallbackProvider').val() || '';
+                translation.TimeoutFallbackProviderId = $('#selectTimeoutFallbackProvider').val() || '';
+                translation.ProvidersInitialized = true;
+            }
+
+            return {
+                load: load,
+                collect: collect,
+                add: add,
+                remove: remove,
+                refreshSelects: refreshSelects
+            };
+        })();
+
+        $('#btnAddTranslationProvider').on('click', function () {
+            TranslationProviderEditor.add();
         });
 
-        // 备用翻译：开关只在启用时显示配置区；具体字段再由「展开/收起」二级控制，平时折叠。
-        $('#chkEnableBackupTranslation').on('change', function () {
-            $('#backupTranslationSection').css('display', this.checked ? 'inherit' : 'none');
+        $('#translationProviderList').on('click', '.btn-remove-translation-provider', function () {
+            TranslationProviderEditor.remove($(this));
         });
 
-        $('#btnBackupTranslationToggle').on('click', function () {
-            var fields = $('#backupTranslationFields');
-            var hidden = fields.css('display') === 'none';
-            fields.css('display', hidden ? 'inherit' : 'none');
-            $('#btnBackupTranslationToggleLabel').text(hidden ? '▼ 收起 Backup 翻译配置' : '▶ 展开 Backup 翻译配置');
-        });
-
-        // 备用通道的 go-openai 专属字段。
-        $('#selectBackupOpenAiTranslator').on('change', function (_) {
-            var goOpenAi = this.value === 'GoOpenAi';
-            $('.selectBackupOpenAiTranslatorGoOpenAi').css('display', goOpenAi ? 'inherit' : 'none');
+        $('#translationProviderList').on('input', '.p-name, .p-model', function () {
+            TranslationProviderEditor.refreshSelects();
         });
 
         // ===== 配置页 Tab 分组 =====
@@ -562,11 +770,6 @@
         function refreshMergeToggle(page) {
             var enabled = page.querySelector('#chkMergeMultiVersion').checked;
             $('.mergeMultiVersionEnabled').css('display', enabled ? 'inherit' : 'none');
-        }
-
-        function refreshBackupToggle(page) {
-            var enabled = page.querySelector('#chkEnableBackupTranslation').checked;
-            $('#backupTranslationSection').css('display', enabled ? 'inherit' : 'none');
         }
 
         $('.MetaTubeConfigurationPage').on('pageshow', function () {
@@ -598,24 +801,7 @@
                 $('#txtGoogleApiUrl', page).val(config.GoogleApiUrl).change();
                 $('#txtDeepLApiKey', page).val(config.DeepLApiKey).change();
                 $('#txtDeepLApiUrl', page).val(config.DeepLApiUrl).change();
-                $('#txtOpenAiApiKey', page).val(config.OpenAiApiKey).change();
-                $('#txtOpenAiApiUrl', page).val(config.OpenAiApiUrl).change();
-                $('#txtOpenAiModel', page).val(config.OpenAiModel).change();
-                $('#selectOpenAiTranslator', page).val(config.OpenAiTranslator).change();
-                $('#txtOpenAiExtraParams', page).val(config.OpenAiExtraParams).change();
-                $('#txtOpenAiMaxCompletionTokens', page).val(config.OpenAiMaxCompletionTokens).change();
-                page.querySelector('#chkEnableBackupTranslation').checked = config.EnableBackupTranslation;
-                $('#txtBackupOpenAiApiKey', page).val(config.BackupOpenAiApiKey).change();
-                $('#txtBackupOpenAiApiUrl', page).val(config.BackupOpenAiApiUrl).change();
-                $('#txtBackupOpenAiModel', page).val(config.BackupOpenAiModel).change();
-                $('#selectBackupOpenAiTranslator', page).val(config.BackupOpenAiTranslator).change();
-                $('#txtBackupOpenAiExtraParams', page).val(config.BackupOpenAiExtraParams).change();
-                $('#txtBackupOpenAiMaxCompletionTokens', page).val(config.BackupOpenAiMaxCompletionTokens).change();
-                $('#txtBackupRefusalPatterns', page).val(config.BackupRefusalPatterns).change();
-                // 备用翻译配置默认收起，只有用户主动展开才可见。
-                $('#backupTranslationFields').css('display', 'none');
-                $('#btnBackupTranslationToggleLabel').text('▶ 展开 Backup 翻译配置');
-                refreshBackupToggle(page);
+                TranslationProviderEditor.load(config);
                 $('#txtMaxChunkSize', page).val(config.MaxChunkSize).change();
                 $('#txtMaxTranslationConcurrency', page).val(config.MaxTranslationConcurrency).change();
                 $('#txtRequestTimeoutSeconds', page).val(config.RequestTimeoutSeconds).change();
@@ -667,20 +853,11 @@
                 config.GoogleApiUrl = $('#txtGoogleApiUrl', form).val();
                 config.DeepLApiKey = $('#txtDeepLApiKey', form).val();
                 config.DeepLXAltUrl = $('#txtDeepLApiUrl', form).val();
-                config.OpenAiApiKey = $('#txtOpenAiApiKey', form).val();
-                config.OpenAiApiUrl = $('#txtOpenAiApiUrl', form).val();
-                config.OpenAiModel = $('#txtOpenAiModel', form).val();
-                config.OpenAiTranslator = $('#selectOpenAiTranslator', form).val();
-                config.OpenAiExtraParams = $('#txtOpenAiExtraParams', form).val();
-                config.OpenAiMaxCompletionTokens = parseInt($('#txtOpenAiMaxCompletionTokens', form).val(), 10) || 0;
-                config.EnableBackupTranslation = $('#chkEnableBackupTranslation', form).prop('checked');
-                config.BackupOpenAiApiKey = $('#txtBackupOpenAiApiKey', form).val();
-                config.BackupOpenAiApiUrl = $('#txtBackupOpenAiApiUrl', form).val();
-                config.BackupOpenAiModel = $('#txtBackupOpenAiModel', form).val();
-                config.BackupOpenAiTranslator = $('#selectBackupOpenAiTranslator', form).val();
-                config.BackupOpenAiExtraParams = $('#txtBackupOpenAiExtraParams', form).val();
-                config.BackupOpenAiMaxCompletionTokens = parseInt($('#txtBackupOpenAiMaxCompletionTokens', form).val(), 10) || 0;
-                config.BackupRefusalPatterns = $('#txtBackupRefusalPatterns', form).val();
+                // 旧版扁平 OpenAI / 备用字段保持原值不动，只把新 Provider 列表与场景路由写回。
+                TranslationProviderEditor.collect(config);
+                config.BackupRefusalPatterns = $('#txtSensitivePatterns', form).val();
+                config.BackupTranslation = config.BackupTranslation || {};
+                config.BackupTranslation.BackupRefusalPatterns = config.BackupRefusalPatterns;
                 config.MaxChunkSize = $('#txtMaxChunkSize', form).val();
                 config.MaxTranslationConcurrency = $('#txtMaxTranslationConcurrency', form).val();
                 config.RequestTimeoutSeconds = $('#txtRequestTimeoutSeconds', form).val();

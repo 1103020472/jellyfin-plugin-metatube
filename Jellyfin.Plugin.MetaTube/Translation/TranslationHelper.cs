@@ -252,51 +252,142 @@ public static class TranslationHelper
         return false;
     }
 
+    /// <summary>
+    /// 接口直接拒绝时，错误信息里常见的「内容审核 / 敏感词」特征。
+    ///
+    /// 与 <see cref="IsRefusalPlaceholder"/> 区分：
+    ///   * 那个看的是**返回的译文**（模型软拒答）；
+    ///   * 这里看的是**异常信息**（网关 / 模型返回 400 content_filter、
+    ///     sensitive words detected 等硬拒绝）。
+    /// 两类都走同一条敏感词降级链路（B）。
+    /// </summary>
+    private static readonly Regex SensitiveErrorRegex = new(
+        @"content[\s_-]*(policy|filter)|moderation|sensitive|safety|prohibited|inappropriate|flagged|风控|敏感|违规",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool IsSensitiveError(Exception e)
+    {
+        return e?.Message != null && SensitiveErrorRegex.IsMatch(e.Message);
+    }
+
+    /// <summary>一次翻译尝试：主通道或某条降级链路上的备用通道。</summary>
+    private sealed class TranslationAttempt
+    {
+        public string Name { get; set; } = string.Empty;
+
+        public string Engine { get; set; } = string.Empty;
+
+        public NameValueCollection Parameters { get; set; }
+
+        /// <summary>发请求前的限速等待（百度 1s / Google 100ms / OpenAI 10ms）。</summary>
+        public int DelayMilliseconds { get; set; }
+
+        /// <summary>本通道的单次请求超时；null 表示沿用全局 API 超时。</summary>
+        public TimeSpan? Timeout { get; set; }
+    }
+
+    /// <summary>
+    /// 单次翻译的通道计划：
+    ///   * <see cref="Primary"/>：A，永远存在；
+    ///   * <see cref="SensitiveFallback"/>：B，A 返回拒答文案 / 接口报内容审核错误时用一次；
+    ///   * <see cref="TimeoutFallback"/>：C，A 超时时用一次。
+    ///
+    /// B 与 C 是两条独立链路：B 失败不会再走 C，C 失败也不会再走 B，
+    /// 后续失败直接抛给上层（符合「后续再失败则不降级」）。
+    /// </summary>
+    private sealed class TranslationPlan
+    {
+        public TranslationAttempt Primary { get; set; }
+
+        public TranslationAttempt SensitiveFallback { get; set; }
+
+        public TranslationAttempt TimeoutFallback { get; set; }
+    }
+
     private static async Task<string> TranslateAsync(string q, string from, string to, string title, int chunkIndex,
         CancellationToken cancellationToken)
     {
-        var nv = BuildTranslationParams(out var millisecondsDelay, out var engineName);
+        var plan = BuildTranslationPlan();
         // 每次翻译前同步一次并发配置，实现"改配置即生效"。
         ApplyConcurrencyLimit();
         await Gate.WaitAsync(cancellationToken);
 
         try
         {
-            async Task<string> TranslateWithDelay(NameValueCollection parameters, string engine, int delay)
+            async Task<string> AttemptAsync(TranslationAttempt attempt, string suffix)
             {
-                await Task.Delay(delay, cancellationToken);
+                if (attempt.DelayMilliseconds > 0)
+                    await Task.Delay(attempt.DelayMilliseconds, cancellationToken);
+
                 var start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 var translationInfo = await ApiClient
-                    .TranslateAsync(q, from, to, engine, parameters, cancellationToken)
+                    .TranslateAsync(q, from, to, attempt.Engine, attempt.Parameters, cancellationToken, attempt.Timeout)
                     .ConfigureAwait(false);
-                LogInfo("Translating {0}#{1} end, cost:{2}ms, chars:{3}", title, chunkIndex,
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, q?.Length ?? 0);
+                LogInfo("Translating {0}#{1} via {2}{3} end, cost:{4}ms, chars:{5}", title, chunkIndex, attempt.Name,
+                    suffix, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - start, q?.Length ?? 0);
                 return translationInfo.TranslatedText;
             }
 
             var context = $"{title}#{chunkIndex}({q?.Length ?? 0}chars)";
-            var translated = await RetryAsync(() => TranslateWithDelay(nv, engineName, millisecondsDelay), 1, context,
-                cancellationToken);
+            string translated;
 
-            // 主通道返回了拒答占位文案，且备用翻译已启用、备用参数可用：
-            // 换备用 OpenAI 参数重发**同一次请求**（请求粒度切换，对上层调用者无感）。
-            if (IsRefusalPlaceholder(translated) && TryBuildBackupParams(out var backupNv, out var backupEngine))
+            try
             {
-                LogWarn("Translate refusal placeholder detected ({0}), switching to backup translation.", context);
+                translated = await RetryAsync(() => AttemptAsync(plan.Primary, string.Empty), 1, context,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // 超时链：主通道超时 → 只切 C 一次；C 再失败就直接抛。
+                if (plan.TimeoutFallback == null)
+                    throw;
+
+                LogWarn("Translate timeout ({0}) via {1}, switching to timeout fallback {2}.", context,
+                    plan.Primary.Name, plan.TimeoutFallback.Name);
+                return await RetryAsync(
+                    () => AttemptAsync(plan.TimeoutFallback, " [timeout-fallback]"), 1,
+                    context + " [timeout-fallback]", cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 用户 / 上层主动取消：不要误判成敏感词或超时去走降级。
+                throw;
+            }
+            catch (Exception e) when (plan.SensitiveFallback != null && IsSensitiveError(e))
+            {
+                // 敏感词链（接口直接报内容审核错误）：只切 B 一次；B 再失败就直接抛。
+                LogWarn("Translate sensitive/content error ({0}) via {1}, switching to sensitive fallback {2}: {3}",
+                    context, plan.Primary.Name, plan.SensitiveFallback.Name, e.Message);
+                return await RetryAsync(
+                    () => AttemptAsync(plan.SensitiveFallback, " [sensitive-fallback]"), 1,
+                    context + " [sensitive-fallback]", cancellationToken);
+            }
+
+            // 敏感词链（模型返回拒答占位文案）：只切 B 一次。
+            if (IsRefusalPlaceholder(translated) && plan.SensitiveFallback != null)
+            {
+                LogWarn("Translate refusal placeholder detected ({0}) via {1}, switching to sensitive fallback {2}.",
+                    context, plan.Primary.Name, plan.SensitiveFallback.Name);
                 try
                 {
-                    var backupTranslated = await RetryAsync(
-                        () => TranslateWithDelay(backupNv, backupEngine, 0), 1, context + " [backup]",
-                        cancellationToken);
-                    // 备用通道也可能给出拒答 / 空结果：都失败时保留主通道结果，避免把占位文案换成语义更差的失败。
-                    if (!IsRefusalPlaceholder(backupTranslated) && !string.IsNullOrWhiteSpace(backupTranslated))
-                        return backupTranslated;
-                    LogWarn("Backup translation also returned refusal/empty ({0}), keeping primary result.", context);
+                    var fallbackTranslated = await RetryAsync(
+                        () => AttemptAsync(plan.SensitiveFallback, " [sensitive-fallback]"), 1,
+                        context + " [sensitive-fallback]", cancellationToken);
+                    // 备用通道也可能给出拒答 / 空结果：都失败时保留主通道结果，
+                    // 避免把占位文案换成语义更差的失败。
+                    if (!IsRefusalPlaceholder(fallbackTranslated) && !string.IsNullOrWhiteSpace(fallbackTranslated))
+                        return fallbackTranslated;
+                    LogWarn("Sensitive fallback also returned refusal/empty ({0}), keeping primary result.", context);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    // 用户取消时不要吞掉异常、返回主通道的拒答文案。
+                    throw;
                 }
                 catch (Exception e)
                 {
-                    // 备用通道失败不应让整个翻译失败：回退到主通道结果。
-                    LogWarn("Backup translation failed ({0}): {1}", context, e.Message);
+                    // B 失败不应让整个翻译失败：回退到主通道结果（B 与 C 是独立链路，不会再去 C）。
+                    LogWarn("Sensitive fallback failed ({0}): {1}", context, e.Message);
                 }
             }
 
@@ -306,6 +397,85 @@ public static class TranslationHelper
         {
             Gate.Release();
         }
+    }
+
+    /// <summary>
+    /// 按当前引擎与场景路由组装本次请求的通道计划。
+    ///
+    /// OpenAI：Provider 列表是唯一数据源。旧版主 / 备用字段只在
+    /// <see cref="TranslationOptions.EnsureProviders"/> 里参与一次性迁移；
+    /// 迁移完成后即使把 Provider 全删了，也不会再从旧字段里“复活”通道。
+    /// 其它引擎：维持原来的单通道逻辑，不参与 Provider 降级。
+    /// </summary>
+    private static TranslationPlan BuildTranslationPlan()
+    {
+        Configuration.EnsureTranslationProvidersMigrated();
+
+        if (Configuration.TranslationEngine == TranslationEngine.OpenAi)
+        {
+            var primary = Configuration.Translation.GetPrimaryProvider();
+            if (primary == null)
+            {
+                throw new InvalidOperationException(
+                    "OpenAI 翻译已启用，但 Provider 列表为空。请先在插件设置里添加至少一个 Provider。");
+            }
+
+            return new TranslationPlan
+            {
+                Primary = BuildProviderAttempt(primary, 10),
+                SensitiveFallback =
+                    BuildProviderAttempt(Configuration.Translation.GetSensitiveFallbackProvider(primary), 0),
+                TimeoutFallback =
+                    BuildProviderAttempt(Configuration.Translation.GetTimeoutFallbackProvider(primary), 0)
+            };
+        }
+
+        return new TranslationPlan
+        {
+            Primary = BuildLegacyPrimaryAttempt(),
+            SensitiveFallback = null,
+            TimeoutFallback = null
+        };
+    }
+
+    private static TranslationAttempt BuildProviderAttempt(TranslationProvider provider, int delayMilliseconds)
+    {
+        if (provider == null)
+            return null;
+
+        TimeSpan? timeout = provider.TimeoutSeconds > 0
+            ? TimeSpan.FromSeconds(Math.Clamp(provider.TimeoutSeconds, 1, 7200))
+            : null;
+
+        return new TranslationAttempt
+        {
+            Name = string.IsNullOrWhiteSpace(provider.Name) ? "OpenAI Provider" : provider.Name,
+            Engine = nameof(TranslationEngine.OpenAi),
+            Parameters = new NameValueCollection
+            {
+                { "openai-api-key", provider.ApiKey ?? string.Empty },
+                { "openai-api-url", provider.ApiUrl ?? string.Empty },
+                { "openai-model", provider.Model ?? string.Empty },
+                // 由 SDK 根据该值选择 openai-translator / go-openai 实现。
+                { "openai-translator", provider.Translator.ToSdkValue() },
+                { "openai-extra-params", provider.ExtraParams ?? string.Empty },
+                { "openai-max-completion-tokens", provider.MaxCompletionTokens.ToString() }
+            },
+            DelayMilliseconds = delayMilliseconds,
+            Timeout = timeout
+        };
+    }
+
+    private static TranslationAttempt BuildLegacyPrimaryAttempt()
+    {
+        var nv = BuildTranslationParams(out var millisecondsDelay, out var engineName);
+        return new TranslationAttempt
+        {
+            Name = engineName,
+            Engine = engineName,
+            Parameters = nv,
+            DelayMilliseconds = millisecondsDelay
+        };
     }
 
     /// <summary>
@@ -366,30 +536,7 @@ public static class TranslationHelper
         return nv;
     }
 
-    /// <summary>
-    /// 拼装备用翻译通道的请求参数。备用通道固定走 OpenAI 兼容接口；
-    /// 开关关闭或连 api key 都没配时返回 false，表示不可用。
-    /// </summary>
-    private static bool TryBuildBackupParams(out NameValueCollection nv, out string engineName)
-    {
-        nv = null;
-        engineName = nameof(TranslationEngine.OpenAi);
-        if (!Configuration.EnableBackupTranslation) return false;
-        if (string.IsNullOrWhiteSpace(Configuration.BackupOpenAiApiKey)) return false;
-
-        nv = new NameValueCollection
-        {
-            { "openai-api-key", Configuration.BackupOpenAiApiKey },
-            { "openai-api-url", Configuration.BackupOpenAiApiUrl },
-            { "openai-model", Configuration.BackupOpenAiModel },
-            { "openai-translator", Configuration.BackupOpenAiTranslator.ToSdkValue() },
-            { "openai-extra-params", Configuration.BackupOpenAiExtraParams },
-            { "openai-max-completion-tokens", Configuration.BackupOpenAiMaxCompletionTokens.ToString() }
-        };
-        return true;
-    }
-
-     public static async Task TranslateAsync(MovieInfo m, string to, CancellationToken cancellationToken)
+    public static async Task TranslateAsync(MovieInfo m, string to, CancellationToken cancellationToken)
     {
         if (string.Equals(to, JapaneseLanguageCode, StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException($"language not allowed: {to}");

@@ -247,10 +247,10 @@ public static class ApiClient
     }
 
     public static async Task<TranslationInfo> TranslateAsync(string q, string from, string to, string engine,
-        NameValueCollection nv, CancellationToken cancellationToken)
+        NameValueCollection nv, CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
         var apiUrl = ComposeTranslateApiUrl(TranslateApi, q, from, to, engine, nv);
-        return await GetDataAsync<TranslationInfo>(apiUrl, false, cancellationToken);
+        return await GetDataAsync<TranslationInfo>(apiUrl, false, cancellationToken, timeout);
     }
 
     #region JavDB cookie 同步
@@ -341,7 +341,7 @@ public static class ApiClient
     #endregion
 
     private static async Task<T> GetDataAsync<T>(string url, bool requireAuth,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -362,7 +362,7 @@ public static class ApiClient
         // 本次请求的超时（配置可调）+ 外部取消联动。
         // 必须覆盖到读取响应体的那一步：翻译的耗时大头在服务端推理，
         // 若只给 SendAsync 设超时，响应头已到但正文还没生成完时不会被判超时。
-        using var cts = CreateRequestContext(cancellationToken);
+        using var cts = CreateRequestContext(cancellationToken, timeout);
 
         var response = await HttpClient.SendAsync(request, cts.Token).ConfigureAwait(false);
 
@@ -442,10 +442,20 @@ public static class ApiClient
     /// 返回的 CTS 必须在请求结束后释放（调用方用 using）。
     /// 外部令牌取消时（例如用户取消任务）也会立即取消本次请求，不会干等超时。
     /// </summary>
-    private static CancellationTokenSource CreateRequestContext(CancellationToken cancellationToken)
+    private static CancellationTokenSource CreateRequestContext(CancellationToken cancellationToken,
+        TimeSpan? timeout = null)
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(RequestTimeout);
+
+        // 翻译通道可以单独指定超时（Provider.TimeoutSeconds），其它请求沿用全局配置。
+        // 夹取到 1 秒 ~ 2 小时，防止误填 0 / 负数导致请求立刻被取消。
+        var effective = timeout ?? RequestTimeout;
+        if (effective < TimeSpan.FromSeconds(1))
+            effective = TimeSpan.FromSeconds(1);
+        else if (effective > TimeSpan.FromHours(2))
+            effective = TimeSpan.FromHours(2);
+
+        cts.CancelAfter(effective);
         return cts;
     }
 

@@ -188,10 +188,10 @@ internal sealed class MetaTubeMainPageController : IPluginUIPageController, IHas
             c => c.Provider, (c, v) => c.Provider = v));
         _tabPages.Add(CreateTab("TemplateOptions", "文本模板",
             c => c.Template, (c, v) => c.Template = v));
-        _tabPages.Add(CreateTab("TranslationOptions", "翻译",
-            c => c.Translation, (c, v) => c.Translation = v));
-        _tabPages.Add(CreateTab("BackupTranslationOptions", "备用翻译",
-            c => c.BackupTranslation, (c, v) => c.BackupTranslation = v));
+        // 翻译页是自定义视图：Provider 列表 + 新增/编辑表单 + 三个场景下拉。
+        // 旧的「备用翻译」tab 已合并进翻译页的「场景路由」。
+        _tabPages.Add(new PluginTabPageController("TranslationOptions", "翻译",
+            () => TranslationTabView.FromConfiguration()));
         _tabPages.Add(CreateTab("MetadataOptions", "评论 / 刷新",
             c => c.Metadata, (c, v) => c.Metadata = v));
         // 替换表用自定义界面（列表 + 编辑表单），不走反射表单

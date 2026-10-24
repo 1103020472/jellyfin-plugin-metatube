@@ -350,6 +350,207 @@ public class TranslationOptions
     [Description("标题中已经包含中文时跳过翻译。")]
 #endif
     public bool EnableCheck { get; set; } = false;
+
+    // ============================================================
+    // OpenAI 多 Provider（DSH 风格）
+    //
+    // 这里的字段不参与 Emby 的反射表单（翻译页是自定义视图），
+    // 但会原样序列化到配置里，供后端与 Jellyfin 手写配置页使用。
+    // ============================================================
+
+    /// <summary>所有 OpenAI 兼容通道。</summary>
+    public List<TranslationProvider> Providers { get; set; } = new();
+
+    /// <summary>主通道（A）的 Provider.Id。</summary>
+    public string PrimaryProviderId { get; set; } = string.Empty;
+
+    /// <summary>遇到敏感词 / 拒答时使用的备用通道（B）的 Provider.Id；留空表示不降级。</summary>
+    public string SensitiveFallbackProviderId { get; set; } = string.Empty;
+
+    /// <summary>主通道超时时使用的备用通道（C）的 Provider.Id；留空表示不降级。</summary>
+    public string TimeoutFallbackProviderId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 是否已经执行过「旧版主 / 备用 OpenAI 配置 → Provider 列表」迁移。
+    ///
+    /// 这个标记必须落盘：用户把 Provider 全部删掉后，不能再从旧字段里把它们复活。
+    /// </summary>
+    public bool ProvidersInitialized { get; set; }
+
+    /// <summary>旧版主通道迁移后使用的固定 Id。</summary>
+    public const string LegacyPrimaryProviderId = "legacy-primary";
+
+    /// <summary>旧版备用通道迁移后使用的固定 Id。</summary>
+    public const string LegacyBackupProviderId = "legacy-backup";
+
+    /// <summary>
+    /// 确保 Provider 列表已初始化：
+    ///   * 第一次运行时把旧版主 / 备用 OpenAI 配置迁成两个 Provider；
+    ///   * 补齐缺失 / 重复的 Id，清理指向已删除 Provider 的场景路由。
+    ///
+    /// 幂等，可以在每次组装翻译请求 / 打开设置页时调用。
+    /// </summary>
+    public void EnsureProviders(BackupTranslationOptions backup)
+    {
+        Providers ??= new List<TranslationProvider>();
+
+        if (!ProvidersInitialized)
+        {
+            ProvidersInitialized = true;
+
+            // 已经有 Provider（例如用户手工编辑了配置文件）就只补标记，不覆盖。
+            if (Providers.Count == 0)
+                MigrateLegacyProviders(backup ?? new BackupTranslationOptions());
+        }
+
+        NormalizeProviders();
+    }
+
+    private void MigrateLegacyProviders(BackupTranslationOptions backup)
+    {
+        var hasPrimary = !string.IsNullOrWhiteSpace(OpenAiApiKey)
+                         || !string.IsNullOrWhiteSpace(OpenAiApiUrl)
+                         || !string.IsNullOrWhiteSpace(OpenAiModel);
+
+        if (hasPrimary)
+        {
+            Providers.Add(new TranslationProvider
+            {
+                Id = LegacyPrimaryProviderId,
+                Name = "主通道（旧配置迁移）",
+                ApiUrl = OpenAiApiUrl ?? string.Empty,
+                ApiKey = OpenAiApiKey ?? string.Empty,
+                Model = OpenAiModel ?? string.Empty,
+                Translator = OpenAiTranslator,
+                ExtraParams = OpenAiExtraParams ?? string.Empty,
+                MaxCompletionTokens = OpenAiMaxCompletionTokens,
+                TimeoutSeconds = 0
+            });
+
+            if (string.IsNullOrWhiteSpace(PrimaryProviderId))
+                PrimaryProviderId = LegacyPrimaryProviderId;
+        }
+
+        var hasBackup = backup.EnableBackupTranslation
+                        && (!string.IsNullOrWhiteSpace(backup.BackupOpenAiApiKey)
+                            || !string.IsNullOrWhiteSpace(backup.BackupOpenAiApiUrl)
+                            || !string.IsNullOrWhiteSpace(backup.BackupOpenAiModel));
+
+        if (hasBackup)
+        {
+            Providers.Add(new TranslationProvider
+            {
+                Id = LegacyBackupProviderId,
+                Name = "备用通道（旧配置迁移）",
+                ApiUrl = backup.BackupOpenAiApiUrl ?? string.Empty,
+                ApiKey = backup.BackupOpenAiApiKey ?? string.Empty,
+                Model = backup.BackupOpenAiModel ?? string.Empty,
+                Translator = backup.BackupOpenAiTranslator,
+                ExtraParams = backup.BackupOpenAiExtraParams ?? string.Empty,
+                MaxCompletionTokens = backup.BackupOpenAiMaxCompletionTokens,
+                TimeoutSeconds = 0
+            });
+
+            if (string.IsNullOrWhiteSpace(SensitiveFallbackProviderId))
+                SensitiveFallbackProviderId = LegacyBackupProviderId;
+        }
+    }
+
+    /// <summary>去空、补 Id、去重、夹取数值，并清理失效的场景路由。</summary>
+    public void NormalizeProviders()
+    {
+        Providers ??= new List<TranslationProvider>();
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        for (var i = Providers.Count - 1; i >= 0; i--)
+        {
+            var provider = Providers[i];
+            if (provider == null)
+            {
+                Providers.RemoveAt(i);
+                continue;
+            }
+
+            provider.Id = (provider.Id ?? string.Empty).Trim();
+            provider.Name = (provider.Name ?? string.Empty).Trim();
+            provider.ApiUrl = (provider.ApiUrl ?? string.Empty).Trim();
+            provider.ApiKey = (provider.ApiKey ?? string.Empty).Trim();
+            provider.Model = (provider.Model ?? string.Empty).Trim();
+            provider.ExtraParams = provider.ExtraParams ?? string.Empty;
+
+            if (provider.MaxCompletionTokens < 0)
+                provider.MaxCompletionTokens = 0;
+
+            provider.TimeoutSeconds = Math.Clamp(provider.TimeoutSeconds, 0, 7200);
+
+            // 没有 Id（手工编辑 JSON 时常见）或 Id 重复：生成一个稳定可用的新 Id。
+            if (provider.Id.Length == 0 || !seen.Add(provider.Id))
+            {
+                provider.Id = Guid.NewGuid().ToString("N");
+                seen.Add(provider.Id);
+            }
+
+            if (provider.Name.Length == 0)
+                provider.Name = string.IsNullOrWhiteSpace(provider.Model)
+                    ? $"Provider {i + 1}"
+                    : provider.Model;
+        }
+
+        PrimaryProviderId = (PrimaryProviderId ?? string.Empty).Trim();
+        SensitiveFallbackProviderId = (SensitiveFallbackProviderId ?? string.Empty).Trim();
+        TimeoutFallbackProviderId = (TimeoutFallbackProviderId ?? string.Empty).Trim();
+
+        if (FindProvider(PrimaryProviderId) == null)
+            PrimaryProviderId = Providers.FirstOrDefault()?.Id ?? string.Empty;
+
+        if (FindProvider(SensitiveFallbackProviderId) == null)
+            SensitiveFallbackProviderId = string.Empty;
+
+        if (FindProvider(TimeoutFallbackProviderId) == null)
+            TimeoutFallbackProviderId = string.Empty;
+    }
+
+    /// <summary>按 Id 查找 Provider；找不到返回 null。</summary>
+    public TranslationProvider FindProvider(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return null;
+
+        return Providers?.FirstOrDefault(p =>
+            p != null && string.Equals(p.Id, id.Trim(), StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>主通道；未显式选择时退化为列表第一个。</summary>
+    public TranslationProvider GetPrimaryProvider()
+    {
+        var provider = FindProvider(PrimaryProviderId);
+        return provider ?? Providers?.FirstOrDefault(p => p != null);
+    }
+
+    /// <summary>敏感词备用通道；未配置或与主通道相同时返回 null（不降级）。</summary>
+    public TranslationProvider GetSensitiveFallbackProvider(TranslationProvider primary)
+    {
+        return ResolveFallback(SensitiveFallbackProviderId, primary);
+    }
+
+    /// <summary>超时备用通道；未配置或与主通道相同时返回 null（不降级）。</summary>
+    public TranslationProvider GetTimeoutFallbackProvider(TranslationProvider primary)
+    {
+        return ResolveFallback(TimeoutFallbackProviderId, primary);
+    }
+
+    private TranslationProvider ResolveFallback(string id, TranslationProvider primary)
+    {
+        var provider = FindProvider(id);
+        if (provider == null)
+            return null;
+
+        if (primary != null && string.Equals(provider.Id, primary.Id, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        return provider;
+    }
 }
 
 /// <summary>备用翻译通道：主通道返回拒答文案时，按请求粒度自动切换。</summary>
