@@ -614,7 +614,7 @@
         // 等接口返回的这段时间用户可能又切了条目，此时结果已经过期
         if (menuContextKey() !== contextKey) return;
 
-        const currentContainer = document.querySelector('.actionsheetScrollSlider');
+        let currentContainer = document.querySelector('.actionsheetScrollSlider');
         if (!currentContainer) return;
 
         // 请求期间用户可能切换到系统菜单 / 关闭菜单，这里再确认一次
@@ -622,6 +622,34 @@
             || isSystemMenu(currentContainer) || isMediaSourceMenu(currentContainer)) {
             document.querySelectorAll('.actionsheetScrollSlider').forEach(removeInjectedButtons);
             return;
+        }
+
+        // =========================
+        // 演员页：先查一下这个名字在替换表里的身份
+        //
+        // 「关联常用名」的按钮文案要靠它（当前常用名 / 当前别名），
+        // 概要里「別名」那一行要不要出「同步别名」按钮，也要靠它判断
+        // 这些别名是不是已经和常用名建立过关系。
+        //
+        // ⚠️ 这个 await 必须放在清理旧按钮之前：从清理到插入之间不能有 await，
+        //    否则会出现「旧按钮已清、新按钮未插」的空窗，MutationObserver 在空窗里
+        //    会重新跑一遍注入（见 scheduleInjectMenu 的注释）。
+        // =========================
+        let aliasInfo = null;
+        if (item?.Type === 'Person' && item?.Name && isAdminReady()) {
+            aliasInfo = await lookupActorAlias(item.Name);
+
+            // 查询期间用户可能又切了条目 / 关了菜单，重新取一次再做同样的检查
+            if (menuContextKey() !== contextKey) return;
+
+            currentContainer = document.querySelector('.actionsheetScrollSlider');
+            if (!currentContainer) return;
+
+            if (!isItemActionMenu(currentContainer)
+                || isSystemMenu(currentContainer) || isMediaSourceMenu(currentContainer)) {
+                document.querySelectorAll('.actionsheetScrollSlider').forEach(removeInjectedButtons);
+                return;
+            }
         }
 
         const title = getTitle();
@@ -680,6 +708,31 @@
                 // 查询结果回来后只改文字，不重排菜单
                 afterInject: (btn) => refreshAliasButtonText(personName, btn)
             });
+
+            // =========================
+            // 同步别名：把概要里「別名」那一行批量写进配置
+            //
+            // 只在「概要里有别名」且「这个别名还没和常用名建立关系」时出现，
+            // 已经关联过的别名不再重复提示；多个别名仍然只有一个按钮，一次批量提交。
+            // =========================
+            const aliasTarget = aliasTargetCommonName(personName, aliasInfo);
+            const pendingAliases = pendingOverviewAliases(
+                extractOverviewAliases(item.Overview),
+                aliasTarget,
+                aliasInfo
+            );
+
+            if (pendingAliases.length > 0) {
+                buttonsToCreate.push({
+                    type: 'sync-alias',
+                    icon: 'sync',
+                    text: syncAliasButtonText(pendingAliases),
+                    handler: async () => {
+                        closeMenu();
+                        await syncOverviewAliases(aliasTarget, pendingAliases);
+                    }
+                });
+            }
         }
 
         // 社交账号按钮放最上面（演员详情页最常用）。
@@ -1369,6 +1422,91 @@
             console.error('[JAV MENU] 关联演员别名失败:', e);
             toast(`❌ 关联失败: ${e.message || e}`);
         }
+    }
+
+    // =========================
+    // 概要里的别名
+    //
+    // 演员的 Overview 由插件后端生成，别名固定占一行（见 ActorProvider.FormatOverview）：
+    //     別名: 旧名1, 旧名2
+    // 老数据 / 其它来源可能写成简体「别名」或中文冒号，一并认。
+    // =========================
+    const OVERVIEW_ALIAS_LINE_RE = /^(?:別名|别名)\s*[:：]\s*(.+)$/;
+
+    function sameAliasName(a, b) {
+        return `${a || ''}`.trim().toLowerCase() === `${b || ''}`.trim().toLowerCase();
+    }
+
+    function extractOverviewAliases(overview) {
+        const result = [];
+        if (!overview) return result;
+
+        // 概要里的换行既可能是 \n，也可能直接写 <br>（后端两种都出现过），一起切
+        `${overview}`.split(/<br\s*\/?>|\r?\n/gi).forEach(function (line) {
+            const match = normalizeLine(line).match(OVERVIEW_ALIAS_LINE_RE);
+            if (!match) return;
+
+            match[1].split(/[,，、;；]/).forEach(function (part) {
+                const name = part.trim();
+                // 概要里偶尔混进标记（<metatube-.../>），带尖括号的一律不要
+                if (!name || name.indexOf('<') >= 0) return;
+                if (!result.some(exist => sameAliasName(exist, name))) result.push(name);
+            });
+        });
+
+        return result;
+    }
+
+    /// 别名要挂到哪个常用名下：这个名字本身已经是别名时，挂到它所属的常用名，
+    /// 否则就用它自己（配置里没有这条记录时后端会自动新建）。
+    function aliasTargetCommonName(name, info) {
+        return info?.commonName ? info.commonName : `${name || ''}`;
+    }
+
+    /// 概要里有、但配置里还没挂到这个常用名下的别名（空数组 = 不用显示同步按钮）
+    function pendingOverviewAliases(overviewAliases, target, info) {
+        // 查不到身份（接口失败）时不显示：没法判断是不是已经建立过关系
+        if (!info || ['common', 'alias', 'none'].indexOf(info.status) < 0) return [];
+
+        const known = Array.isArray(info.aliases) ? info.aliases : [];
+
+        return overviewAliases.filter(function (name) {
+            // 和常用名同名的不算别名（后端也会直接拒绝）
+            if (sameAliasName(name, target)) return false;
+            // 已经在这个常用名下的别名，不用再同步
+            return !known.some(exist => sameAliasName(exist, name));
+        });
+    }
+
+    function syncAliasButtonText(aliases) {
+        if (!aliases.length) return '🔄 同步别名';
+
+        // 和「当前别名：a、b」一个风格：少的时候直接列出来，多了显示个数
+        const shown = aliases.slice(0, 2).join('、');
+        if (aliases.length <= 2) return `🔄 同步别名（${shown}）`;
+        return `🔄 同步别名（${shown} 等 ${aliases.length} 个）`;
+    }
+
+    // =========================
+    // 演员页：把概要里的别名批量写进替换表
+    //
+    // 概要里的「別名」是源站给的其它写法（旧艺名 / 日文名 / 英文名），
+    // 配置里没有它们时，刮到同一个人的其它写法还是会被当成两个演员。
+    // 这里把概要里还没建立关系的别名一次性提交，逐个怎么处理交给后端
+    // （需要改挂 / 需要合并常用名时后端回 confirm，由 submitAliasLink 弹确认）。
+    // =========================
+    async function syncOverviewAliases(common, aliases) {
+        const shown = aliases.slice(0, 10).map(name => `「${name}」`).join('、');
+        const more = aliases.length > 10 ? ` 等 ${aliases.length} 个` : '';
+
+        const ok = await confirmDialog(
+            '同步别名',
+            `把概要里的${shown}${more}挂到「${common}」下？\n\n以后刮到这些名字会自动换成「${common}」。`,
+            '同步'
+        );
+        if (!ok) return;
+
+        await submitAliasLink(aliases.join(', '), common, false, false);
     }
 
     // =========================
