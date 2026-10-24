@@ -6,6 +6,8 @@
     //
     // 1) 菜单扩展：在动作菜单（列表页卡片 / 详情页的「…」）最上面插入自定义按钮；
     //    演员有 Twitter / Instagram 时，置顶插入「打开 Twitter / Instagram」。
+    //    番号刮错时可以点「移除所有数据」：清空元数据 + 锁定 + 删除所有图片
+    //    （等价于「移除识别」+ 勾选锁定 + 逐张删图，之后用视频截图当封面）。
     // 2) 概述链接：把概述正文里的 “Twitter: xxx” / “Instagram: xxx”
     //    动态转成可点链接（Emby 渲染概述时会清洗 <a>，所以这里是渲染完成后
     //    由 JS 直接改 DOM 插入的，不会被清洗掉）。
@@ -847,6 +849,31 @@
             }
         }
 
+        // =========================
+        // 移除所有数据：清空元数据 + 锁定 + 删除所有图片
+        //   场景：番号刮错了（刮出来是另一部片），干脆不刮，用视频截图当封面。
+        //   只对视频类条目、且只对管理员显示（Emby 的 reset 接口要求管理员）。
+        // =========================
+        if (item?.Id && isAdminReady() && CLEAR_DATA_TYPES.indexOf(`${item.Type || ''}`) >= 0) {
+            buttonsToCreate.push({
+                type: 'clear-data',
+                icon: 'delete_sweep',
+                text: '🧹 移除所有数据',
+                handler: async () => {
+                    closeMenu();
+                    const ok = await confirmDialog(
+                        '移除所有数据',
+                        `将清空「${item.Name || title || item.Id}」的全部元数据`
+                        + '（简介 / 类型 / 演员 / 年份 / ProviderIds 等），锁定元数据变更，并删除所有图片（海报、背景图等）。\n\n'
+                        + '之后不会再被刮削覆盖，封面用视频截图代替。\n此操作不可撤销。',
+                        '移除'
+                    );
+                    if (!ok) return;
+                    await clearAllItemData(item);
+                }
+            });
+        }
+
         // 倒序插入以保持置顶和正常的排列顺序
         for (let i = buttonsToCreate.length - 1; i >= 0; i--) {
             const btnData = buttonsToCreate[i];
@@ -1222,6 +1249,156 @@
         } catch (e) {
             console.error('[JAV MENU] 取消拆分标记失败:', e);
             toast(`❌ 取消标记失败: ${e.message || e}`);
+        }
+    }
+
+    // =========================
+    // 移除所有数据：清空元数据 + 锁定 + 删除所有图片
+    //
+    // 场景：番号刮错了（或者刮出来根本是另一部片），只能不刮，用视频截图当封面。
+    // 等价于在 Emby 后台手工做三件事：
+    //   1) 「移除识别」：POST items/metadata/reset
+    //      —— 清掉 ProviderIds / 简介 / 类型 / 演员 / 年份 / 分级等，标题保留；
+    //   2) 编辑元数据里勾「锁定」：POST Items/{id}（LockData=true）；
+    //   3) 图片编辑器里逐张删图：POST Items/{id}/Images/{Type}[/{Index}]/Delete。
+    //
+    // 顺序是硬要求：必须先「移除识别」再「锁定」。
+    //   实测 Emby 4.9.3：锁定状态下调 reset 只会清掉 ProviderIds，
+    //   简介 / 类型 / 演员 / 年份都还留在条目上。
+    // 另外整个流程里绝不能触发 Emby 的 Refresh：
+    //   刷新会按条目标题重新刮一遍（ProviderIds 清空也照刮），把数据又填回来，
+    //   所以这里只做 reset + 锁定 + 删图，是否再刷图由用户自己决定。
+    // =========================
+    const CLEAR_DATA_TYPES = ['Movie', 'Episode', 'Video', 'MusicVideo'];
+
+    let clearDataRunning = false;
+
+    function embyApiUrl(path, params) {
+        const client = window.ApiClient;
+        const url = params ? client.getUrl(path, params) : client.getUrl(path);
+        return url + (url.indexOf('?') >= 0 ? '&' : '?')
+            + 'X-Emby-Token=' + encodeURIComponent(client.accessToken());
+    }
+
+    async function embyApiPost(path, params, body) {
+        const headers = {};
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+        const res = await fetch(embyApiUrl(path, params), {
+            method: 'POST',
+            headers: headers,
+            body: body !== undefined ? JSON.stringify(body) : undefined
+        });
+
+        if (!res.ok) {
+            let detail = '';
+            try {
+                detail = `${(await res.text()) || ''}`.replace(/\s+/g, ' ').slice(0, 160);
+            } catch (e) {
+                // 读不到响应体就只报状态码
+            }
+            throw new Error(`HTTP ${res.status}${detail ? `：${detail}` : ''}`);
+        }
+        return res;
+    }
+
+    async function fetchItemDto(itemId) {
+        const userId = window.ApiClient.getCurrentUserId
+            ? window.ApiClient.getCurrentUserId()
+            : (window.ApiClient._serverInfo || {}).UserId;
+
+        // 不取 MediaSources / MediaStreams：回写时不需要，少传点字段更不容易出错
+        return window.ApiClient.getItem(userId, itemId, {
+            ExcludeFields: 'Chapters,MediaSources,MediaStreams,Subviews'
+        });
+    }
+
+    async function resetItemMetadata(itemId) {
+        if (typeof window.ApiClient.resetMetadata === 'function') {
+            await window.ApiClient.resetMetadata({ ItemIds: `${itemId}` });
+            return;
+        }
+        await embyApiPost('items/metadata/reset', null, { ItemIds: `${itemId}` });
+    }
+
+    async function lockItemMetadata(itemId) {
+        // 必须重新取一次 dto：reset 之后拿到的才是空数据。
+        // 用 reset 之前的旧 dto 回写，会把刚清掉的元数据又写回去。
+        const dto = await fetchItemDto(itemId);
+        dto.LockData = true;
+
+        if (typeof window.ApiClient.updateItem === 'function') {
+            await window.ApiClient.updateItem(dto);
+        } else {
+            await embyApiPost(`Items/${itemId}`, null, dto);
+        }
+        return dto;
+    }
+
+    async function deleteAllItemImages(item) {
+        const itemId = item.Id;
+        const tags = item.ImageTags || {};
+
+        // 单图类型（Primary/Thumb/Logo/Banner/Art/Disc…）：按 dto 里实际存在的删，
+        // 不硬编码类型，免得漏掉某个插件写进去的图片
+        for (const type of Object.keys(tags)) {
+            if (type === 'Backdrop' || !tags[type]) continue;
+            await embyApiPost(`Items/${itemId}/Images/${type}/Delete`);
+        }
+
+        // Backdrop 是多图，只能按 index 删，而且必须从最后一张往前删：
+        // 删掉前面一张后，后面的索引会整体前移，正着删会漏图 / 删错图
+        const backdrops = (item.BackdropImageTags || []).length;
+        for (let index = backdrops - 1; index >= 0; index--) {
+            await embyApiPost(`Items/${itemId}/Images/Backdrop/${index}/Delete`);
+        }
+    }
+
+    async function clearAllItemData(item) {
+        if (!item?.Id) {
+            toast('❌ 没有拿到条目信息，请重试');
+            return;
+        }
+
+        if (clearDataRunning) {
+            toast('⏳ 正在处理中，请稍候…');
+            return;
+        }
+        clearDataRunning = true;
+
+        try {
+            showIndicator('🧹 正在移除元数据…');
+            await resetItemMetadata(item.Id);
+
+            showIndicator('🔒 正在锁定元数据…');
+            const locked = await lockItemMetadata(item.Id);
+
+            showIndicator('🖼️ 正在删除图片…');
+            await deleteAllItemImages(locked);
+
+            // 回查一遍，确认三个动作都生效再告诉用户成功
+            const after = await fetchItemDto(item.Id);
+            const leftImages = Object.keys(after?.ImageTags || {}).length
+                + (after?.BackdropImageTags || []).length;
+
+            hideIndicator();
+
+            if (after?.LockData && leftImages === 0) {
+                toast('✅ 已移除所有数据：元数据已清空、已锁定、图片已删除');
+            } else {
+                const parts = [];
+                if (!after?.LockData) parts.push('元数据没锁上');
+                if (leftImages > 0) parts.push(`还剩 ${leftImages} 张图片`);
+                toast(`⚠️ 已执行，但${parts.join('、')}`);
+            }
+
+            setTimeout(() => location.reload(), 1500);
+        } catch (e) {
+            hideIndicator();
+            console.error('[JAV MENU] 移除所有数据失败:', e);
+            toast(`❌ 移除失败: ${e.message || e}`);
+        } finally {
+            clearDataRunning = false;
         }
     }
 
