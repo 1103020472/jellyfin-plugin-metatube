@@ -3,6 +3,7 @@ using Jellyfin.Plugin.MetaTube.Translation;
 #if __EMBY__
 using System.ComponentModel;
 using Emby.Web.GenericEdit;
+using Emby.Web.GenericEdit.Common;
 using MediaBrowser.Model.Attributes;
 #endif
 
@@ -634,13 +635,27 @@ public class MergeOptions
     /// <summary>
     /// 参与合并的媒体库名单（逗号分隔的库名）。留空 = 所有电影库都参与（默认全选）。
     /// 只有名单内的库才会被合并任务扫描；名单外即使有同番号多版本也不合并。
+    /// Emby 设置页里渲染成「媒体库多选列表」：选项来自 <see cref="LibraryList"/>，
+    /// 勾选结果由 Emby 自动写回本属性（逗号分隔的库名），存盘格式与旧版完全一致，
+    /// 所以旧配置不用迁移；后端 <c>GetMergeMoviesLibraries()</c> 照旧按库名过滤。
     /// </summary>
 #if __EMBY__
     [DisplayName("参与合并的媒体库")]
-    [Description("允许合并的电影库名称，用逗号分隔。留空表示包含全部媒体库（默认）。")]
+    [Description("勾选允许合并的电影库（可多选）。一个都不勾 = 所有电影库都参与合并（默认）。")]
+    [EditMultilSelect]
+    [SelectItemsSource(nameof(LibraryList))]
     [VisibleCondition(nameof(MergeMultiVersion), ValueCondition.IsEqual, true)]
 #endif
     public string MergeMoviesLibraryList { get; set; } = string.Empty;
+
+#if __EMBY__
+    /// <summary>
+    /// 上面那个多选列表的数据源（UI 专用，不落盘）。
+    /// 每次打开设置页时由 ConfigurationTabView 现读服务器媒体库，库增删后立刻可见。
+    /// </summary>
+    [Browsable(false)]
+    public IEnumerable<EditorSelectOption> LibraryList { get; set; }
+#endif
 
     /// <summary>解析后的库名单；空集合表示不限制（全部库参与）。</summary>
     public List<string> GetMergeMoviesLibraries()

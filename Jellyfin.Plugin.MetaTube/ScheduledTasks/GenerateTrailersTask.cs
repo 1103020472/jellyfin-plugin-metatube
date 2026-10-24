@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using Jellyfin.Plugin.MetaTube.Extensions;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -23,7 +24,17 @@ public class GenerateTrailersTask : IScheduledTask
 
     // Uniform suffix for all trailer files.
     private const string TrailerFileSuffix = "-Trailer.strm";
-    private const string TrailerSearchPattern = $"*{TrailerFileSuffix}";
+
+    // StrmAssistant 会在预告片旁写 <预告片文件名去后缀>-mediainfo.json，改名时需一并同步。
+    private const string MediaInfoSuffix = "-mediainfo.json";
+
+    // 番号形态：字母前缀 + 可选连字符 + 数字（ABP-123 / DSVR-2015 / TEN1-22-2）。
+    // 纯数字日期式番号（20150930、082413-415）和 "[Videos]"、"www.98T.la@" 这类片名
+    // 都不满足该形态，会退化到 ProviderId 或媒体文件名，避免不同影片撞到同一个文件名。
+    private static readonly Regex NumberPattern = new("^[A-Za-z]+-?\\d", RegexOptions.Compiled);
+
+    // File name length guard (path segment safety).
+    private const int MaxKeyLength = 100;
 
     // UTF-8 without BOM encoding.
     private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(false);
@@ -101,53 +112,38 @@ public class GenerateTrailersTask : IScheduledTask
                 if (File.Exists(Path.Join(trailersFolderPath, ".ignore")))
                     continue;
 
+                // 一个目录只保留一个预告片文件，文件名以“影片标识”为准：
+                // 同一部片的多 part / 多版本会解析出同一个 key，因此天然共享同一个
+                // <key>-Trailer.strm；不同影片才会各自落到不同文件。
+                var trailerKey = SanitizeFileName(GetTrailerKey(item));
+                if (string.IsNullOrWhiteSpace(trailerKey))
+                    continue;
+
+                var trailerFilePath = Path.Join(trailersFolderPath, $"{trailerKey}{TrailerFileSuffix}");
+
+                // 旧命名（片名首段）迁移：只在新文件缺失、旧文件存在时原地改名，
+                // 内容与时间戳都不变，不会触发重新下载或重新生成。
+                MigrateLegacyTrailerFile(item, trailersFolderPath, trailerFilePath);
+
                 var trailerUrl = item.GetTrailerUrl();
 
                 // Skip if no remote trailers.
+                // 注意：这里不再删除同目录下的预告片文件。同目录可能存在多个影片条目，
+                // 旧的“删掉 *-Trailer.strm 并删除空目录”逻辑会把别人的预告片一起删掉，
+                // 造成两个条目每轮互相删除、反复重写（进而触发 Emby 的实时监控与重复刮削）。
                 if (string.IsNullOrWhiteSpace(trailerUrl))
-                {
-                    if (Directory.Exists(trailersFolderPath))
-                    {
-                        // Delete obsolete trailer files.
-                        DeleteFiles(trailersFolderPath, TrailerSearchPattern);
-
-                        // Delete directory if empty.
-                        DeleteDirectoryIfEmpty(trailersFolderPath);
-                    }
-
                     continue;
-                }
-
-                var trailerFilePath = Path.Join(trailersFolderPath,
-                    $"{item.Name.Split().First()}{TrailerFileSuffix}");
-
-#if __EMBY__
-                var lastSavedUtcDateTime = item.DateLastSaved.UtcDateTime;
-#else
-                var lastSavedUtcDateTime = item.DateLastSaved.ToUniversalTime();
-#endif
 
                 // When trailer file already exists.
-                if (File.Exists(trailerFilePath))
-                {
-                    // Skip if trailer file is up to date.
-                    if (File.GetLastWriteTimeUtc(trailerFilePath).CompareTo(lastSavedUtcDateTime) >= 0)
-                        continue;
-
-                    // Skip if content is not modified.
-                    if (string.Equals(await File.ReadAllTextAsync(trailerFilePath, cancellationToken), trailerUrl))
-                    {
-                        File.SetLastWriteTimeUtc(trailerFilePath, DateTime.UtcNow);
-                        continue;
-                    }
-                }
+                // 幂等只比对内容：内容一致直接跳过，且不再回写文件时间戳——
+                // 改 mtime 本身就会产生一次文件变更事件，反过来喂给 Emby 的 LibraryMonitor。
+                if (File.Exists(trailerFilePath)
+                    && string.Equals(await File.ReadAllTextAsync(trailerFilePath, cancellationToken), trailerUrl))
+                    continue;
 
                 // Create trailers folder if not exists.
                 if (!Directory.Exists(trailersFolderPath))
                     Directory.CreateDirectory(trailersFolderPath);
-
-                // Delete other trailer files, if any.
-                DeleteFiles(trailersFolderPath, TrailerSearchPattern, trailerFilePath);
 
                 _logger.Info("Generate trailer for video {0} at {1}", item.Name, trailerFilePath);
 
@@ -163,19 +159,80 @@ public class GenerateTrailersTask : IScheduledTask
         progress?.Report(100);
     }
 
-    private static void DeleteFiles(string path, string searchPattern, params string[] excludedFiles)
+    /// <summary>
+    /// 计算预告片文件名的 key（不含后缀）。
+    /// 优先级：番号形态的片名首段 → MetaTube ProviderId(provider-id) → 媒体文件名。
+    /// 同一部片的多个 part / 多份拷贝会得到相同 key，因此一个目录里只产出一个预告片文件。
+    /// </summary>
+    private static string GetTrailerKey(BaseItem item)
     {
-        DeleteFiles(Directory.GetFiles(path, searchPattern).Where(file => !excludedFiles.Contains(file)));
+        var token = FirstToken(item.Name);
+        if (!string.IsNullOrWhiteSpace(token) && NumberPattern.IsMatch(token))
+            return token;
+
+        // ProviderId 才是影片的真正身份：同片不同分片、不同拷贝都一致，不同影片必然不同。
+        var pid = item.GetPid(Plugin.Instance.Name);
+        if (!string.IsNullOrWhiteSpace(pid.Provider) && !string.IsNullOrWhiteSpace(pid.Id))
+            return $"{pid.Provider}-{pid.Id}";
+
+        var fileName = Path.GetFileNameWithoutExtension(item.Path);
+        return string.IsNullOrWhiteSpace(fileName) ? token : fileName;
     }
 
-    private static void DeleteFiles(IEnumerable<string> files)
+    private static string FirstToken(string name)
     {
-        foreach (var file in files) File.Delete(file);
+        return string.IsNullOrWhiteSpace(name)
+            ? string.Empty
+            : name.Split(new[] { ' ', '\t', '\u3000' }, StringSplitOptions.RemoveEmptyEntries)
+                .FirstOrDefault() ?? string.Empty;
     }
 
-    private static void DeleteDirectoryIfEmpty(string path)
+    /// <summary>
+    /// 旧版本用「片名首段」做文件名，且不区分同目录下的多个条目。
+    /// 升级时把旧文件原地改名成新 key，避免整库重新生成预告片。
+    /// </summary>
+    private void MigrateLegacyTrailerFile(BaseItem item, string trailersFolderPath, string trailerFilePath)
     {
-        if (!Directory.GetDirectories(path).Any() && !Directory.GetFiles(path).Any())
-            Directory.Delete(path);
+        try
+        {
+            var legacyKey = FirstToken(item.Name);
+            if (string.IsNullOrWhiteSpace(legacyKey))
+                return;
+
+            var legacyFilePath = Path.Join(trailersFolderPath, $"{legacyKey}{TrailerFileSuffix}");
+            if (string.Equals(legacyFilePath, trailerFilePath, StringComparison.Ordinal))
+                return;
+            if (File.Exists(trailerFilePath) || !File.Exists(legacyFilePath))
+                return;
+
+            File.Move(legacyFilePath, trailerFilePath);
+            _logger.Info("Migrate trailer file name for video {0}: {1}", item.Name, trailerFilePath);
+
+            // StrmAssistant 会在预告片旁写 <name>-mediainfo.json，一并改名保持对应。
+            var legacyMediaInfo = Path.Join(trailersFolderPath,
+                $"{Path.GetFileNameWithoutExtension(legacyFilePath)}{MediaInfoSuffix}");
+            var mediaInfo = Path.Join(trailersFolderPath,
+                $"{Path.GetFileNameWithoutExtension(trailerFilePath)}{MediaInfoSuffix}");
+            if (File.Exists(legacyMediaInfo) && !File.Exists(mediaInfo))
+                File.Move(legacyMediaInfo, mediaInfo);
+        }
+        catch (Exception e)
+        {
+            _logger.Warn("Migrate trailer file name for video {0} failed: {1}", item.Name, e.Message);
+        }
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return string.Empty;
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder(name.Length);
+        foreach (var c in name)
+            builder.Append(invalid.Contains(c) ? '-' : c);
+
+        var result = builder.ToString().Trim();
+        return result.Length > MaxKeyLength ? result[..MaxKeyLength] : result;
     }
 }

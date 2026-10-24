@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Web.GenericEdit;
+using Emby.Web.GenericEdit.Common;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Events;
 using MediaBrowser.Model.GenericEdit;
@@ -80,6 +82,11 @@ internal sealed class ConfigurationTabView<TGroup> : PluginTabPageView
         : base(getter(Plugin.Instance.Configuration))
     {
         _setter = setter;
+
+        // 多版本合并页里的「媒体库」多选列表：每次打开都现读一次服务器媒体库，
+        // 这样新增/删除/改名的库能立刻反映到界面上。
+        if (ContentData is MergeOptions merge)
+            merge.LibraryList = BuildLibraryOptions();
     }
 
     public override Task<IPluginUIView> OnSaveCommand(string itemId, string commandId, string data)
@@ -92,6 +99,39 @@ internal sealed class ConfigurationTabView<TGroup> : PluginTabPageView
         }
 
         return Task.FromResult<IPluginUIView>(this);
+    }
+
+    /// <summary>
+    /// 构造「媒体库」多选项：筛选规则与合并任务
+    /// （<c>MergeMultiVersionsTask.GetMovieLibraries()</c>）保持一致 ——
+    /// 电影库 + 未指定类型的混合库。Value 用库名，因为后端配置里存的就是库名。
+    /// </summary>
+    private static List<EditorSelectOption> BuildLibraryOptions()
+    {
+        try
+        {
+            var libraryManager = Plugin.Instance.ApplicationHost?.Resolve<ILibraryManager>();
+            if (libraryManager == null)
+                return new List<EditorSelectOption>();
+
+            return libraryManager.GetVirtualFolders()
+                .Where(folder => string.IsNullOrWhiteSpace(folder.CollectionType)
+                                 || string.Equals(folder.CollectionType, "movies",
+                                     StringComparison.OrdinalIgnoreCase))
+                .OrderBy(folder => folder.Name, StringComparer.CurrentCulture)
+                .Select(folder => new EditorSelectOption
+                {
+                    Value = folder.Name,
+                    Name = folder.Name,
+                    IsEnabled = true
+                })
+                .ToList();
+        }
+        catch (Exception e)
+        {
+            Plugin.Instance.logger?.ErrorException("Build merge library options failed", e);
+            return new List<EditorSelectOption>();
+        }
     }
 }
 

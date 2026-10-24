@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         4k2论坛帖子缩略图 + Emby检测（最终稳定版）
 // @namespace    http://tampermonkey.net/
-// @version      7.6
+// @version      7.7
 // @match        https://4k2.me/*
 // @match        https://4k2.com/*
 // @grant        GM_xmlhttpRequest
@@ -859,18 +859,27 @@
     //
     // 流程：只针对「Emby 中不存在」的番号，逐个进详情页解析 down.772.one 直链，
     // 剔除「Y:\光鸭云盘\未同步」里已下载过的文件，结果缓存到按钮上；
-    // 再次点击按钮弹出二次交互弹框，按番号维度展示直链 + 封面缩略图（悬浮看大图），
-    // 勾选后一键复制为纯 URL 文本。
+    // 再次点击按钮弹出二次交互弹框，按番号维度展示直链 + 帖子日期 + 历史提取次数 +
+    // 封面缩略图（悬浮看大图），勾选后一键复制为纯 URL 文本。
+    // 直链按番号持久化到 localStorage（4k2-vr-link-cache-v1）：同一番号再次提取直接复用，
+    // 不再进详情页；每个番号的触发次数单独累计（4k2-vr-extract-stats-v1）供二次弹框展示。
 
     const VR_FORUM_ID = '27';
     // 「未同步」目录的文件名清单（浏览器读不到本地盘，必须由用户选一次目录后缓存）。
     const VR_DOWNLOADED_KEY = '4k2-vr-downloaded-files';
+    // 按番号缓存的直链提取结果：同一番号再次提取时直接复用，不再进详情页。
+    const VR_LINK_CACHE_KEY = '4k2-vr-link-cache-v1';
+    // 每个番号的累计提取次数（二次弹框展示「历史提取 N 次」）。
+    const VR_EXTRACT_STATS_KEY = '4k2-vr-extract-stats-v1';
     const MEDIA_EXT_REGEX = /\.(?:mp4|mkv|mov|avi|wmv|flv|m2ts|ts)(?:\?.*)?$/i;
     const IMAGE_EXT_REGEX = /\.(?:jpe?g|png|gif|webp|bmp)(?:\?.*)?$/i;
     // 直链域名以后可能变，主要靠扩展名识别，这里只作为兜底提示。
     const VR_LINK_HOST_HINT = /772\.one/i;
 
     let vrLinkCache = null;       // 提取结果，仅当前页面内存；刷新页面自然清空
+    let vrLinkStore = null;       // 按番号持久化的直链缓存（localStorage）
+    let vrExtractStats = null;    // 按番号累计的提取次数（localStorage）
+    let vrLastRunMeta = null;     // 最近一次提取的统计（缓存命中数等）
     let vrDownloadedSet = null;   // 已下载文件名集合（小写）
     let vrDownloadedMeta = null;  // { count, at }
     let isVrExtracting = false;
@@ -946,6 +955,162 @@
         updateVrDirButtonLabel();
     }
 
+    // ---------- 按番号持久化：直链缓存 + 提取次数 ----------
+
+    function loadVrLinkStore() {
+        if (vrLinkStore) return vrLinkStore;
+        vrLinkStore = { version: 1, byCode: {} };
+        try {
+            const saved = JSON.parse(localStorage.getItem(VR_LINK_CACHE_KEY) || 'null');
+            if (saved && saved.byCode && typeof saved.byCode === 'object') {
+                vrLinkStore.byCode = saved.byCode;
+            }
+        } catch {}
+        return vrLinkStore;
+    }
+
+    function saveVrLinkStore() {
+        try {
+            localStorage.setItem(VR_LINK_CACHE_KEY, JSON.stringify(loadVrLinkStore()));
+        } catch (error) {
+            console.warn('[4k2直链] 本地缓存写入失败:', error);
+        }
+    }
+
+    function getVrCachedLinkEntry(code) {
+        const entry = loadVrLinkStore().byCode[code];
+        if (!entry || !Array.isArray(entry.links) || !entry.links.length) return null;
+        return entry;
+    }
+
+    function getVrCachedCodeCount() {
+        return Object.keys(loadVrLinkStore().byCode || {}).length;
+    }
+
+    function updateVrLinkCacheEntry(code, info) {
+        const store = loadVrLinkStore();
+        const previous = store.byCode[code] || {};
+        // 同一番号可能出现在多个帖子里，直链做并集，避免后抓到的帖子覆盖掉之前的链接。
+        const links = [...new Set([...(previous.links || []), ...(info.links || [])])];
+        if (!links.length) return;
+        store.byCode[code] = {
+            code,
+            links,
+            // 元信息以最早一次记录为准，保证「帖子日期」与展示的直链来源一致。
+            cover: previous.cover || info.cover || null,
+            title: previous.title || info.title || '',
+            threadUrl: previous.threadUrl || info.threadUrl || '',
+            postDate: previous.postDate || info.postDate || '',
+            postDateRaw: previous.postDateRaw || info.postDateRaw || '',
+            updatedAt: Date.now()
+        };
+    }
+
+    function loadVrExtractStats() {
+        if (vrExtractStats) return vrExtractStats;
+        vrExtractStats = {};
+        try {
+            const saved = JSON.parse(localStorage.getItem(VR_EXTRACT_STATS_KEY) || 'null');
+            if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+                vrExtractStats = saved;
+            }
+        } catch {}
+        return vrExtractStats;
+    }
+
+    function saveVrExtractStats() {
+        try {
+            localStorage.setItem(VR_EXTRACT_STATS_KEY, JSON.stringify(loadVrExtractStats()));
+        } catch (error) {
+            console.warn('[4k2直链] 提取次数写入失败:', error);
+        }
+    }
+
+    function getVrExtractMeta(code) {
+        const entry = loadVrExtractStats()[code];
+        return {
+            count: entry ? Number(entry.count) || 0 : 0,
+            firstAt: entry ? Number(entry.firstAt) || 0 : 0,
+            lastAt: entry ? Number(entry.lastAt) || 0 : 0
+        };
+    }
+
+    function bumpVrExtractCount(code, counted) {
+        if (!code || counted.has(code)) return;
+        counted.add(code);
+        const stats = loadVrExtractStats();
+        const entry = stats[code] || { count: 0, firstAt: 0, lastAt: 0 };
+        entry.count = (Number(entry.count) || 0) + 1;
+        entry.lastAt = Date.now();
+        if (!entry.firstAt) entry.firstAt = entry.lastAt;
+        stats[code] = entry;
+    }
+
+    function pad2(value) {
+        return String(value).padStart(2, '0');
+    }
+
+    function formatVrStamp(timestamp) {
+        const date = new Date(Number(timestamp));
+        if (Number.isNaN(date.getTime())) return '';
+        return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ` +
+            `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+    }
+
+    // 列表页 .kmtime 既可能是绝对日期，也可能是「昨天 03:53」「3 天前」这类相对时间。
+    // 统一换算成绝对日期后再展示和缓存，否则缓存里的「昨天」过几天就错了。
+    function parseVrPostDate(row) {
+        const raw = (row?.querySelector('.kmtime')?.textContent || '')
+            .replace(/^\s*发表于\s*/, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!raw) return { date: '', raw: '' };
+
+        const now = new Date();
+        const stamp = (date, withTime) =>
+            `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}` +
+            (withTime ? ` ${pad2(date.getHours())}:${pad2(date.getMinutes())}` : '');
+        const shiftDays = days => new Date(now.getFullYear(), now.getMonth(), now.getDate() + days);
+
+        const absolute = raw.match(/(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?/);
+        if (absolute) {
+            const date = new Date(Number(absolute[1]), Number(absolute[2]) - 1, Number(absolute[3]),
+                Number(absolute[4] || 0), Number(absolute[5] || 0));
+            return { date: stamp(date, absolute[4] !== undefined), raw };
+        }
+
+        if (/刚刚/.test(raw)) return { date: stamp(now, true), raw };
+
+        let match = raw.match(/(\d+)\s*秒前/);
+        if (match) return { date: stamp(new Date(now.getTime() - Number(match[1]) * 1000), true), raw };
+        match = raw.match(/(\d+)\s*分钟前/);
+        if (match) return { date: stamp(new Date(now.getTime() - Number(match[1]) * 60000), true), raw };
+        match = raw.match(/(\d+)\s*小时前/);
+        if (match) return { date: stamp(new Date(now.getTime() - Number(match[1]) * 3600000), true), raw };
+        match = raw.match(/(\d+)\s*天前/);
+        if (match) return { date: stamp(shiftDays(-Number(match[1])), false), raw };
+
+        match = raw.match(/(今天|昨天|前天)\s*(\d{1,2}):(\d{2})/);
+        if (match) {
+            const offset = match[1] === '今天' ? 0 : match[1] === '昨天' ? -1 : -2;
+            const date = shiftDays(offset);
+            date.setHours(Number(match[2]), Number(match[3]), 0, 0);
+            return { date: stamp(date, true), raw };
+        }
+
+        match = raw.match(/^(今天|昨天|前天)$/);
+        if (match) {
+            const offset = match[1] === '今天' ? 0 : match[1] === '昨天' ? -1 : -2;
+            return { date: stamp(shiftDays(offset), false), raw };
+        }
+
+        // 跨年帖 Discuz 只显示「10-16」这种月日。
+        match = raw.match(/^(\d{1,2})-(\d{1,2})$/);
+        if (match) return { date: `${now.getFullYear()}-${pad2(match[1])}-${pad2(match[2])}`, raw };
+
+        return { date: raw, raw };
+    }
+
     // 用目录选择器读取「未同步」目录：只取文件名，不读文件内容。
     // 注意：必须在用户点击的同步调用链里触发，否则浏览器会拦截。
     function pickVrUnsyncedDir(onDone) {
@@ -984,7 +1149,6 @@
         const seen = new Set();
         const groups = new Map();
         const fallback = codeInfos.find(info => !info.exists) || codeInfos[0];
-        let skipped = 0;
 
         // 直链在正文里是普通 <a>，只能用 DOM 解析；用正则扫 HTML 会漏掉
         // 路径段里含 g 等字符的链接（如 swxd8egl/kiwvr00911_1_8k.mp4）。
@@ -997,18 +1161,15 @@
             const owner = codeInfos.find(info => name.includes(normalizeVrCode(info.code)));
             // 该番号 Emby 里已有，交给原有脚本逻辑，不在这里处理。
             if (owner && owner.exists) return;
-            // 已经在「未同步」里下过的，不重复提取。
-            if (isVrDownloaded(url)) {
-                skipped++;
-                return;
-            }
 
             const code = owner ? owner.code : fallback.code;
             if (!groups.has(code)) groups.set(code, { code, links: [] });
             groups.get(code).links.push(url);
         });
 
-        return { cover, groups: [...groups.values()], skipped };
+        // 「已下载」过滤交给调用方：本地缓存要保留原始直链，
+        // 重新选择「未同步」目录后才能按新清单重新过滤。
+        return { cover, groups: [...groups.values()] };
     }
 
     function pickVrCover(root, threadUrl) {
@@ -1063,12 +1224,14 @@
         button.disabled = true;
         button.style.background = '#6c757d';
 
+        // 同一次提取里同一番号可能出现在多个帖子，次数只记一次。
+        const countedCodes = new Set();
         let finished = false;
         try {
             const rows = getForumThreadRows().filter(row => !/^stickthread_/.test(row.id));
             const targets = [];
 
-            // 第一轮：查 Emby，只留下不存在的番号。
+            // 第一轮：查 Emby，只留下不存在的番号，并记下帖子日期。
             for (let index = 0; index < rows.length; index++) {
                 const row = rows[index];
                 const subject = row.querySelector('.km_subject');
@@ -1081,21 +1244,80 @@
                 button.textContent = `[检查 Emby ${index + 1}/${rows.length}]`;
                 const results = await Promise.all(codes.map(code => queryEmbyMovie(code)));
                 const codeInfos = codes.map((code, i) => ({ code, exists: !!(results[i] && results[i].exists) }));
-                if (!codeInfos.some(info => !info.exists)) continue;
+                const missingCodes = codeInfos.filter(info => !info.exists).map(info => info.code);
+                if (!missingCodes.length) continue;
 
                 targets.push({
                     codeInfos,
+                    missingCodes,
                     title: (subject.textContent || '').replace(/\s+/g, ' ').trim(),
-                    threadUrl: titleLink.href
+                    threadUrl: titleLink.href,
+                    postDate: parseVrPostDate(row)
                 });
             }
 
             let skippedDownloaded = 0;
+            let cacheHits = 0;
+            let fetchedThreads = 0;
             const byCode = new Map();
 
-            // 第二轮：逐个详情页提取直链。
+            const addGroup = (code, group) => {
+                const previous = byCode.get(code);
+                if (previous) {
+                    group.links.forEach(link => {
+                        if (!previous.links.includes(link)) previous.links.push(link);
+                    });
+                    if (!previous.cover) previous.cover = group.cover || null;
+                    if (!previous.postDate) previous.postDate = group.postDate || '';
+                    if (!previous.postDateRaw) previous.postDateRaw = group.postDateRaw || '';
+                    return previous;
+                }
+                const entry = {
+                    code,
+                    title: group.title || '',
+                    threadUrl: group.threadUrl || '',
+                    cover: group.cover || null,
+                    postDate: group.postDate || '',
+                    postDateRaw: group.postDateRaw || '',
+                    links: group.links.slice(),
+                    fromCache: !!group.fromCache,
+                    cacheUpdatedAt: group.cacheUpdatedAt || 0
+                };
+                byCode.set(code, entry);
+                return entry;
+            };
+
+            // 第二轮：先吃本地缓存，缓存里没有的番号才进详情页。
             for (let index = 0; index < targets.length; index++) {
                 const target = targets[index];
+                const pendingCodes = [];
+
+                target.missingCodes.forEach(code => {
+                    const cached = getVrCachedLinkEntry(code);
+                    if (!cached) {
+                        pendingCodes.push(code);
+                        return;
+                    }
+                    cacheHits++;
+                    bumpVrExtractCount(code, countedCodes);
+                    // 缓存里存的是原始直链，这里按当前「未同步」清单过滤。
+                    const links = cached.links.filter(link => !isVrDownloaded(link));
+                    skippedDownloaded += cached.links.length - links.length;
+                    addGroup(code, {
+                        links,
+                        cover: cached.cover,
+                        title: cached.title || target.title,
+                        threadUrl: cached.threadUrl || target.threadUrl,
+                        postDate: cached.postDate || target.postDate.date,
+                        postDateRaw: cached.postDateRaw || target.postDate.raw,
+                        fromCache: true,
+                        cacheUpdatedAt: cached.updatedAt || 0
+                    });
+                });
+
+                // 该帖子的番号全都有缓存，不必再读详情页。
+                if (!pendingCodes.length) continue;
+
                 button.textContent = `[读取详情 ${index + 1}/${targets.length}]`;
                 let response;
                 try {
@@ -1105,27 +1327,38 @@
                     console.warn('[4k2直链] 详情页读取失败:', target.threadUrl, error);
                     continue;
                 }
+                fetchedThreads++;
 
                 const parsed = parseVrThreadLinks(response.responseText, target.threadUrl, target.codeInfos);
-                skippedDownloaded += parsed.skipped;
                 parsed.groups.forEach(group => {
-                    const previous = byCode.get(group.code);
-                    if (previous) {
-                        group.links.forEach(link => {
-                            if (!previous.links.includes(link)) previous.links.push(link);
-                        });
-                        if (!previous.cover) previous.cover = parsed.cover;
-                    } else {
-                        byCode.set(group.code, {
-                            code: group.code,
-                            title: target.title,
-                            threadUrl: target.threadUrl,
-                            cover: parsed.cover,
-                            links: group.links.slice()
-                        });
-                    }
+                    bumpVrExtractCount(group.code, countedCodes);
+                    // 原始直链（含已下载的）写入本地缓存，供下次跳过详情页。
+                    updateVrLinkCacheEntry(group.code, {
+                        links: group.links,
+                        cover: parsed.cover,
+                        title: target.title,
+                        threadUrl: target.threadUrl,
+                        postDate: target.postDate.date,
+                        postDateRaw: target.postDate.raw
+                    });
+
+                    const links = group.links.filter(link => !isVrDownloaded(link));
+                    skippedDownloaded += group.links.length - links.length;
+                    if (!links.length) return;
+                    addGroup(group.code, {
+                        links,
+                        cover: parsed.cover,
+                        title: target.title,
+                        threadUrl: target.threadUrl,
+                        postDate: target.postDate.date,
+                        postDateRaw: target.postDate.raw
+                    });
                 });
             }
+
+            // 直链缓存 + 番号提取次数统一落盘。
+            saveVrLinkStore();
+            saveVrExtractStats();
 
             const groups = [...byCode.values()]
                 .filter(group => group.links.length)
@@ -1133,6 +1366,7 @@
             const totalLinks = groups.reduce((sum, group) => sum + group.links.length, 0);
 
             vrLinkCache = groups;
+            vrLastRunMeta = { cacheHits, fetchedThreads, at: Date.now() };
             finished = true;
 
             if (!groups.length) {
@@ -1145,7 +1379,10 @@
             button.textContent = `[提取完成 ${groups.length}番号/${totalLinks}直链 · 点此查看]`;
             button.style.background = '#28a745';
             showVrToast(`直链提取完成：${groups.length} 个番号 / ${totalLinks} 条直链` +
-                (skippedDownloaded ? `，已跳过 ${skippedDownloaded} 条已下载` : '') + '。再次点击按钮查看。');
+                (cacheHits ? `；${cacheHits} 个番号命中本地缓存，未进详情页` : '') +
+                (fetchedThreads ? `；读取详情页 ${fetchedThreads} 个` : '') +
+                (skippedDownloaded ? `，已跳过 ${skippedDownloaded} 条已下载` : '') +
+                `。本地共缓存 ${getVrCachedCodeCount()} 个番号，再次点击按钮查看。`);
         } finally {
             isVrExtracting = false;
             button.disabled = false;
@@ -1247,7 +1484,11 @@
 
         const hint = document.createElement('div');
         hint.style.cssText = 'color:#666;font-size:12px;margin-bottom:10px;';
-        hint.textContent = '勾选番号后点“复制”即可把对应直链逐行写入剪贴板；鼠标悬停封面小图可看大图。';
+        hint.textContent = '勾选番号后点“复制”即可把对应直链逐行写入剪贴板；鼠标悬停封面小图可看大图。' +
+            '每个番号显示帖子日期与历史提取次数。' +
+            (vrLastRunMeta && vrLastRunMeta.cacheHits
+                ? `本次 ${vrLastRunMeta.cacheHits} 个番号命中本地缓存（未进详情页）。`
+                : '');
 
         const toolbar = document.createElement('div');
         toolbar.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;';
@@ -1319,6 +1560,48 @@
                 'text-overflow:ellipsis;white-space:nowrap;';
             header.append(input, codeText, countText, titleText);
 
+            // 帖子日期 + 历史提取次数：日期统一换算成绝对日期，悬停可看列表页原始写法。
+            const stats = getVrExtractMeta(group.code);
+            const meta = document.createElement('div');
+            meta.style.cssText = 'margin-top:4px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;' +
+                'color:#777;font-size:12px;';
+
+            const dateSpan = document.createElement('span');
+            dateSpan.className = 'vr-post-date';
+            dateSpan.textContent = `发帖 ${group.postDate || '日期未知'}`;
+            if (group.postDateRaw && group.postDateRaw !== group.postDate) {
+                dateSpan.title = `列表页显示：${group.postDateRaw}`;
+            }
+
+            const countSpan = document.createElement('span');
+            countSpan.className = 'vr-extract-count';
+            countSpan.textContent = `历史提取 ${stats.count} 次`;
+            if (stats.lastAt) {
+                const first = stats.firstAt ? `首次：${formatVrStamp(stats.firstAt)}；` : '';
+                countSpan.title = `${first}上次提取：${formatVrStamp(stats.lastAt)}`;
+            }
+
+            meta.append(dateSpan, countSpan);
+
+            if (group.fromCache) {
+                const cacheSpan = document.createElement('span');
+                cacheSpan.className = 'vr-cache-badge';
+                cacheSpan.textContent = '本地缓存';
+                cacheSpan.style.cssText = 'color:#2e7d32;';
+                if (group.cacheUpdatedAt) cacheSpan.title = `缓存于 ${formatVrStamp(group.cacheUpdatedAt)}`;
+                meta.appendChild(cacheSpan);
+            }
+
+            if (group.threadUrl) {
+                const threadLink = document.createElement('a');
+                threadLink.href = group.threadUrl;
+                threadLink.target = '_blank';
+                threadLink.rel = 'noopener';
+                threadLink.textContent = '帖子';
+                threadLink.style.cssText = 'color:#0066cc;text-decoration:none;';
+                meta.appendChild(threadLink);
+            }
+
             const linkBox = document.createElement('div');
             linkBox.style.cssText = 'margin-top:6px;display:flex;flex-direction:column;gap:2px;';
             group.links.forEach(link => {
@@ -1331,7 +1614,7 @@
                 linkBox.appendChild(anchor);
             });
 
-            body.append(header, linkBox);
+            body.append(header, meta, linkBox);
             card.append(thumbWrap, body);
             list.appendChild(card);
             entries.push({ group, input, card });
@@ -1353,7 +1636,7 @@
         actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px;';
         const repick = document.createElement('button');
         repick.textContent = '重选未同步目录';
-        repick.style.cssText = 'margin-right:auto;background:#eee;border:1px solid #ccc;border-radius:4px;padding:8px 12px;cursor:pointer;';
+        repick.style.cssText = 'background:#eee;border:1px solid #ccc;border-radius:4px;padding:8px 12px;cursor:pointer;';
         repick.onclick = () => pickVrUnsyncedDir(picked => {
             if (!picked || !vrLinkCache) return;
             // 重新按新的已下载清单过滤，已经下过的不再展示。
@@ -1368,6 +1651,22 @@
                 alert('按新的「未同步」清单过滤后，已没有剩余直链。');
             }
         });
+
+        const clearCache = document.createElement('button');
+        clearCache.textContent = '清空直链缓存';
+        clearCache.title = '清空本地按番号缓存的直链；历史提取次数保留';
+        clearCache.style.cssText = 'background:#eee;border:1px solid #ccc;border-radius:4px;padding:8px 12px;cursor:pointer;';
+        clearCache.onclick = () => {
+            const cachedCount = getVrCachedCodeCount();
+            if (!cachedCount) {
+                status.textContent = '本地还没有缓存任何番号的直链。';
+                return;
+            }
+            if (!confirm(`确定清空本地缓存的 ${cachedCount} 个番号直链吗？清空后再次提取会重新进详情页。`)) return;
+            vrLinkStore = { version: 1, byCode: {} };
+            saveVrLinkStore();
+            status.textContent = `已清空本地直链缓存（${cachedCount} 个番号）；历史提取次数保留。`;
+        };
 
         const close = document.createElement('button');
         close.textContent = '关闭';
@@ -1396,7 +1695,10 @@
             }
         };
 
-        actions.append(repick, close, copy);
+        const spacer = document.createElement('div');
+        spacer.style.cssText = 'flex:1;';
+
+        actions.append(repick, clearCache, spacer, close, copy);
         panel.append(heading, hint, toolbar, list, status, actions);
         overlay.appendChild(panel);
         overlay.addEventListener('click', event => {
