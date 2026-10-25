@@ -244,6 +244,17 @@ public class PluginConfiguration : BasePluginConfiguration
         set => BadgeImage.DefaultImageQuality = value;
     }
 
+    /// <summary>
+    /// 条目已经有背景图时，是否不再提供背景图候选（避免每次刷新重复下载）。
+    /// 默认 false：保持与旧版本一致的「照旧提供全部候选」行为。
+    /// </summary>
+    [Browsable(false)]
+    public bool SkipExistingBackdrop
+    {
+        get => BadgeImage.SkipExistingBackdrop;
+        set => BadgeImage.SkipExistingBackdrop = value;
+    }
+
     [Browsable(false)]
     public bool EnableMovieProviderFilter
     {

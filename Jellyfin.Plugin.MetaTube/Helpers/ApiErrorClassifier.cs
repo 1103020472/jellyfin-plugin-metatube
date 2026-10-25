@@ -76,6 +76,25 @@ public static class ApiErrorClassifier
     }
 
     /// <summary>
+    /// 是否属于「条目里存的 provider 在服务端根本不存在」。
+    ///
+    /// 典型场景：条目 ProviderIds 里存着 <c>JAV321:xxx</c>，但服务端已经把这个 provider
+    /// 关掉了（见 SDK engine/init.go：<c>provider.Priority() &lt;= 0</c> 的 provider 不注册），
+    /// 于是每次刷新元数据都必然 404 provider not found —— 条目永远修不好，日志永远刷错误。
+    ///
+    /// 与「源站没有这个番号」（同样是 404，但文案是 info not found / Not Found）区分开：
+    /// 前者是 pid 失效，应该丢弃 pid 重新搜索；后者是源站确实没有，重搜也没用。
+    /// </summary>
+    public static bool IsProviderNotRegistered(Exception e)
+    {
+        var message = e?.Message;
+        if (string.IsNullOrWhiteSpace(message))
+            return false;
+
+        return message.Contains(ProviderNotFound, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// 是否属于「番号在源站没有评论」。与 <see cref="IsNotFound"/> 的区别在于
     /// 这里明确排除了「provider 不支持」等其它 404，便于调用方给出准确文案。
     /// </summary>

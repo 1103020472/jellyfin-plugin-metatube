@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Specialized;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -205,8 +206,19 @@ public static class ApiClient
     public static async Task<List<ActorSearchResult>> SearchActorAsync(string q, string provider,
         bool fallback, CancellationToken cancellationToken)
     {
+        var cacheKey = BuildActorSearchCacheKey(q, provider, fallback);
+        if (TryGetCachedActorSearch(cacheKey, out var cached))
+        {
+            LogInfo("演员搜索命中缓存：{0}（省掉一次远端查询）", q);
+            return cached;
+        }
+
         var apiUrl = ComposeSearchApiUrl(ActorSearchApi, q, provider, fallback);
-        return await GetDataAsync<List<ActorSearchResult>>(apiUrl, true, cancellationToken);
+        var results = await GetDataAsync<List<ActorSearchResult>>(apiUrl, true, cancellationToken);
+
+        // 只缓存成功且非空的结果：未搜到（404）与异常都不缓存，避免把临时故障固化 10 分钟。
+        StoreActorSearch(cacheKey, results);
+        return results;
     }
 
     public static async Task<List<MovieSearchResult>> SearchMovieAsync(string q,
@@ -252,6 +264,114 @@ public static class ApiClient
         var apiUrl = ComposeTranslateApiUrl(TranslateApi, q, from, to, engine, nv);
         return await GetDataAsync<TranslationInfo>(apiUrl, false, cancellationToken, timeout);
     }
+
+    #region 演员搜索缓存
+
+    /// <summary>
+    /// 演员搜索结果缓存（滑动过期）。
+    ///
+    /// 演员查询是整条刮削链上最贵的一步：每次都要到 AV-LEAGUE 现抓网页，实测单次 2~4 秒。
+    /// 而同一批刮削里同一个演员会被反复查询 —— 实测一轮 1052 次查询只涉及 305 个演员，
+    /// 重复率 71%（例如「上原亜衣」一轮里被查了 203 次），每次都白等 3 秒多。
+    ///
+    /// 这里按「关键词 + provider + fallback」缓存**成功且非空**的结果：
+    /// 10 分钟内有访问就续期，连续 10 分钟没人用到才真正过期。
+    /// 这样批量刮削期间缓存一直有效，刮完闲置 10 分钟后自动释放，不会长期占内存、也不会让数据变陈旧。
+    ///
+    /// 空结果与异常不缓存：演员「未搜到」可能只是临时故障，固化成 10 分钟会掩盖真实问题。
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, ActorSearchCacheEntry> ActorSearchCache = new();
+
+    /// <summary>缓存空闲过期时间：期间每次命中都会续期（滑动过期）。</summary>
+    private static readonly TimeSpan ActorSearchCacheTtl = TimeSpan.FromMinutes(10);
+
+    /// <summary>缓存条目上限，防止长时间运行无限增长。</summary>
+    private const int ActorSearchCacheCapacity = 5000;
+
+    private sealed class ActorSearchCacheEntry
+    {
+        public List<ActorSearchResult> Results;
+        public long LastAccessTicks;
+    }
+
+    private static string BuildActorSearchCacheKey(string q, string provider, bool fallback)
+    {
+        // \u001f 是单元分隔符，正常关键词里不可能出现，避免拼接歧义。
+        return $"{provider}\u001f{fallback}\u001f{q}";
+    }
+
+    private static bool TryGetCachedActorSearch(string key, out List<ActorSearchResult> results)
+    {
+        results = null;
+
+        if (!ActorSearchCache.TryGetValue(key, out var entry))
+            return false;
+
+        var now = DateTime.UtcNow.Ticks;
+        if (now - Interlocked.Read(ref entry.LastAccessTicks) > ActorSearchCacheTtl.Ticks)
+        {
+            // 空闲超过 10 分钟：真正过期，删掉。
+            ActorSearchCache.TryRemove(key, out _);
+            return false;
+        }
+
+        // 命中即续期（滑动过期）。
+        Interlocked.Exchange(ref entry.LastAccessTicks, now);
+
+        // 返回副本：调用方可能会对结果列表做增删（如 AddRange / 排序），不能让它动到缓存本体。
+        results = new List<ActorSearchResult>(entry.Results);
+        return true;
+    }
+
+    private static void StoreActorSearch(string key, List<ActorSearchResult> results)
+    {
+        if (results == null || results.Count == 0)
+            return;
+
+        if (ActorSearchCache.Count >= ActorSearchCacheCapacity)
+            EvictActorSearchCache();
+
+        ActorSearchCache[key] = new ActorSearchCacheEntry
+        {
+            Results = new List<ActorSearchResult>(results),
+            LastAccessTicks = DateTime.UtcNow.Ticks
+        };
+    }
+
+    private static void EvictActorSearchCache()
+    {
+        var now = DateTime.UtcNow.Ticks;
+
+        // 先清掉已经过期的。
+        foreach (var kvp in ActorSearchCache)
+        {
+            if (now - Interlocked.Read(ref kvp.Value.LastAccessTicks) > ActorSearchCacheTtl.Ticks)
+                ActorSearchCache.TryRemove(kvp.Key, out _);
+        }
+
+        if (ActorSearchCache.Count < ActorSearchCacheCapacity)
+            return;
+
+        // 仍然满：按最近访问时间淘汰最久没用的 10%。
+        var victims = ActorSearchCache
+            .OrderBy(kvp => Interlocked.Read(ref kvp.Value.LastAccessTicks))
+            .Take(Math.Max(1, ActorSearchCacheCapacity / 10))
+            .Select(kvp => kvp.Key)
+            .ToList();
+
+        foreach (var key in victims)
+            ActorSearchCache.TryRemove(key, out _);
+    }
+
+    /// <summary>
+    /// 清空演员搜索缓存。切换服务端地址 / Token 后调用，避免拿旧服务端的演员 ID。
+    /// </summary>
+    public static void ClearActorSearchCache()
+    {
+        ActorSearchCache.Clear();
+    }
+
+    #endregion
 
     #region JavDB cookie 同步
 

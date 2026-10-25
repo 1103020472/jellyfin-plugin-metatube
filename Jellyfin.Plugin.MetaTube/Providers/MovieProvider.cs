@@ -84,6 +84,20 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
                             "请在插件设置里填写 JavDB cookie 后重试。", info.Name);
             return new MetadataResult<Movie> { HasMetadata = false };
         }
+        catch (Exception e) when (ApiErrorClassifier.IsProviderNotRegistered(e) && !string.IsNullOrWhiteSpace(pid.Provider))
+        {
+            // 条目里存的 provider 在服务端已经不存在了（例如 JAV321 因为优先级 0 被关掉、或 provider 改名）。
+            // 继续拿这个 pid 请求只会每次刷新都 404 provider not found，条目永远修不好。
+            //
+            // 注意：这里**不能**靠「丢掉 pid 重新搜索」自愈。媒体服务器的元数据合并逻辑在
+            // 「不替换全部元数据」（ReplaceAllMetadata=false，也就是日常刷新）时只补空字段，
+            // 不会覆盖条目上已有的 provider id —— 实测重搜后拿到新 pid 也写不回去，
+            // 反而每条白花一次搜索 + 一次翻译。所以这里只把原因说清楚，不做事。
+            // 真要修这类条目，需要一次性用「替换全部元数据」刷新，或者用媒体服务器的「识别」功能重新指定。
+            Logger.Warn("条目「{0}」记录的来源「{1}」在服务端已不可用（{2}），本条跳过。",
+                info.Name, pid.ToString(), e.Message);
+            return new MetadataResult<Movie> { HasMetadata = false };
+        }
         if (!string.IsNullOrWhiteSpace(m.Number))
         {
             m.Number = m.Number.ToUpperInvariant();

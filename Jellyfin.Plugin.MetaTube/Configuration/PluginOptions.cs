@@ -121,6 +121,16 @@ public class BadgeImageOptions
     [Required]
 #endif
     public int DefaultImageQuality { get; set; } = 90;
+
+#if __EMBY__
+    [DisplayName("已有背景图时不再下载")]
+    [Description("开启后：条目已经有背景图就不再提供背景图候选，省的每次刷新都把它们重新下载一遍" +
+                 "（实测每条能省 2~4 秒，下载回来往往又被当作重复图丢弃）。" +
+                 "此开关默认关闭，保持与旧版本完全一致的行为。" +
+                 "注意：对已有背景图的条目做「替换所有图片」刷新时，背景图会变空；" +
+                 "需要重新抓背景图，请先删掉该条目的背景图再刷新。")]
+#endif
+    public bool SkipExistingBackdrop { get; set; } = false;
 }
 
 /// <summary>数据源：影片提供者过滤、JavDB 会话 cookie。</summary>

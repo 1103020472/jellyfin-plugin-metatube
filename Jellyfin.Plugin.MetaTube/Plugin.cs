@@ -84,7 +84,13 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     /// <summary>
     /// 保存配置（供 tab 页视图调用）。
     /// </summary>
-    internal void SaveConfiguration(PluginConfiguration configuration) => SaveOptions(configuration);
+    internal void SaveConfiguration(PluginConfiguration configuration)
+    {
+        SaveOptions(configuration);
+
+        // 服务端地址 / Token 可能变了，缓存的演员 ID 会指向旧服务端，直接清掉。
+        ApiClient.ClearActorSearchCache();
+    }
 
     public Stream GetThumbImage()
     {
