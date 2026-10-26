@@ -802,9 +802,14 @@
         // =========================
         const pid = item?.ProviderIds?.MetaTube || '';
         const provider = `${pid}`.split(':')[0];
-        const REVIEW_PROVIDERS = ['FANZA', 'MGS'];
+        // 与插件后端 ReviewAppender.SupportedProviders 保持一致（SDK 里实现了 MovieReviewer 的那几家）：
+        //   10musume / 1Pondo / Caribbeancom / CaribbeancomPR / PACOPACOMAMA / FANZA / MGS / HEYZO
+        // MURAMURA 虽然声明了 MovieReviewer 但实现返回 nil（无评论），故不列入。
+        // 大小写不敏感比较：SDK 注册名里 10musume 是小写，CaribbeancomPR 带大写 PR。
+        const REVIEW_PROVIDERS = ['10musume', '1Pondo', 'Caribbeancom', 'CaribbeancomPR', 'PACOPACOMAMA', 'FANZA', 'MGS', 'HEYZO'];
+        const reviewProviderMatched = REVIEW_PROVIDERS.some(p => p.toLowerCase() === `${provider}`.trim().toLowerCase());
 
-        if (item?.Id && REVIEW_PROVIDERS.indexOf(provider) >= 0) {
+        if (item?.Id && reviewProviderMatched) {
             buttonsToCreate.push({
                 type: 'reviews',
                 icon: 'comment',

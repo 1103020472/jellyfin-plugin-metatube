@@ -35,8 +35,30 @@ namespace Jellyfin.Plugin.MetaTube;
 /// </summary>
 public static class ReviewAppender
 {
-    /// <summary>只有这两家提供评论（与 UpdateReviewsTask 保持一致）。</summary>
-    public static readonly string[] SupportedProviders = { "FANZA", "MGS" };
+    /// <summary>
+    /// 支持评论的 provider 列表（与 MetaTube SDK 侧 <c>provider.MovieReviewer</c> 的实现一一对应）。
+    ///
+    /// 目前 SDK 里声明了 MovieReviewer 的 provider 共 9 个：
+    ///   10musume / 1Pondo / Caribbeancom / CaribbeancomPR / PACOPACOMAMA / FANZA / MGS / MURAMURA / HEYZO
+    /// 其中 MURAMURA 的实现直接返回 nil（<c>no reviews provided</c>），实际永远拿不到评论，
+    /// 因此不列入；HEYZO 有完整实现，但其源站在部分网络环境下不可达，拉取会失败并降级为日志提示。
+    ///
+    /// 名字大小写与 SDK 注册名保持一致；比较走 <see cref="Supports"/>（大小写不敏感），
+    /// 以兼容历史条目的写法差异。
+    /// </summary>
+    public static readonly string[] SupportedProviders =
+    {
+        "10musume", "1Pondo", "Caribbeancom", "CaribbeancomPR", "PACOPACOMAMA", "FANZA", "MGS", "HEYZO"
+    };
+
+    /// <summary>该 provider 是否支持评论（大小写不敏感，忽略首尾空白）。</summary>
+    public static bool Supports(string provider)
+    {
+        if (string.IsNullOrWhiteSpace(provider))
+            return false;
+
+        return SupportedProviders.Contains(provider.Trim(), StringComparer.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// 2026-06-11 之后的评论用「精确到分」的时间标记，之前只用日期。
@@ -121,9 +143,9 @@ public static class ReviewAppender
             return result;
         }
 
-        if (!SupportedProviders.Contains(pid.Provider))
+        if (!Supports(pid.Provider))
         {
-            result.Message = $"来源 {pid.Provider} 不支持评论（仅 FANZA / MGS）";
+            result.Message = $"来源 {pid.Provider} 不支持评论（支持：{string.Join(" / ", SupportedProviders)}）";
             return result;
         }
 

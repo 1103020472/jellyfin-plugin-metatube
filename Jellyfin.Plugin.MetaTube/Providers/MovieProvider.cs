@@ -138,8 +138,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         }
 
 
-        var reviewProviders = new[] { "FANZA", "MGS" };
-        if (Configuration.ReviewSwitch && reviewProviders.Contains(pid.Provider))
+        if (Configuration.ReviewSwitch && ReviewAppender.Supports(pid.Provider))
         {
             Logger.Info("获取评论：{0}", pid.Id);
             try
