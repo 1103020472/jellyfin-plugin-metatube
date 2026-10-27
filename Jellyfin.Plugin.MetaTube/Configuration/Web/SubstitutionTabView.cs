@@ -237,7 +237,10 @@ internal sealed class SubstitutionTabView : PluginTabPageView
             EnableGenreSubstitution = dto.EnableGenreSubstitution,
             GenreRawSubstitutionTable = dto.GenreRawSubstitutionTable,
 
-            ActorRows = map.Groups.Select(BuildActorRow).ToList(),
+            // 列表倒序显示：最近添加的排在最上面。
+            // 内部（配置 JSON / 高级文本框）仍然按添加时间正序保存，只是渲染时翻过来，
+            // 这样反复保存不会来回翻转顺序。
+            ActorRows = Enumerable.Reverse(map.Groups).Select(BuildActorRow).ToList(),
             ExclusionRows = map.Exclusions.Select(BuildExclusionRow).ToList(),
 
             AddActorButton = new ButtonItem
@@ -269,7 +272,7 @@ internal sealed class SubstitutionTabView : PluginTabPageView
                 IsVisible = true,
                 Text = map.Groups.Count == 0
                     ? "还没有配置任何演员。点下面的「新增演员」开始，或者直接把现成的表粘到底部的高级文本框里再点保存。"
-                    : $"共 {map.Groups.Count} 位演员、{map.AliasCount} 个别名。列表按添加时间排列。"
+                    : $"共 {map.Groups.Count} 位演员、{map.AliasCount} 个别名。最近添加的排在最上面。"
             },
             ActorHint = new LabelItem
             {
