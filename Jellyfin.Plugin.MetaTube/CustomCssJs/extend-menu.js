@@ -368,6 +368,70 @@
     }
 
     // =========================
+    // 刷新当前页（App 安全版）
+    //
+    // ⚠️ 这里绝对不能再用 location.reload()：
+    //   App 端（魔改 Emby 客户端）是把网页版塞进 WebView 里跑的，整页 reload
+    //   会销毁当前文档、重建整个 JS 上下文；而原生那一侧（播放器 / 媒体会话 /
+    //   下载队列 / 注入的 JS 桥）还挂着旧文档上的回调和对 WebView 的引用，
+    //   重载后这些回调打到已经销毁的 WebView 上，进程被直接干掉 ——
+    //   表现就是「拉取评论 → 最后刷新那一下 → 闪退回桌面」。
+    //   PC 浏览器里 reload 只是「重新加载」，所以一直看不出问题。
+    //
+    // 改用 Emby 自己的前端路由重新渲染当前页：只换视图，不销毁文档。
+    //   注意 appRouter.show(path) 对「当前路径」是空操作（源码里
+    //   contextPath === path 就直接 return Promise.resolve()），
+    //   所以这里给路径加一个 _r 随机参数，让路由认为换了一页。
+    //   实测（Emby 4.9.3）：新视图会正常渲染并显示，旧视图转入历史栈。
+    // =========================
+    function getCurrentRoutePath() {
+        // Emby 4.9 用 hashbang 路由：#!/item?id=123&serverId=xxx
+        const hash = `${window.location.hash || ''}`.replace(/^#!?/, '');
+        return hash || null;
+    }
+
+    function refreshPage() {
+        const path = getCurrentRoutePath();
+        if (!path) {
+            console.warn('[JAV MENU] 拿不到当前路由，跳过自动刷新');
+            return;
+        }
+
+        const bust = path + (path.indexOf('?') >= 0 ? '&' : '?') + '_r=' + Date.now();
+        let rendered = false;
+
+        // 首选 page.js 的 show(path, state, dispatch, push)：
+        //   dispatch=true 会重新走一遍路由（重新取 Item 并渲染），
+        //   push=false 不写历史记录，返回键不会莫名多停一页。
+        try {
+            if (window.require) {
+                window.require(['pageJs'], function (page) {
+                    if (page && typeof page.show === 'function') {
+                        rendered = true;
+                        page.show(bust, {}, true, false);
+                    }
+                });
+            }
+        } catch (e) {
+            console.warn('[JAV MENU] pageJs 刷新失败:', e);
+        }
+
+        if (rendered) return;
+
+        // 兜底：走公开的 Emby.Page.show（会多一条历史记录，但同样不销毁文档）
+        setTimeout(function () {
+            if (rendered) return;
+            try {
+                if (window.Emby && window.Emby.Page && typeof window.Emby.Page.show === 'function') {
+                    window.Emby.Page.show(bust);
+                }
+            } catch (e) {
+                console.warn('[JAV MENU] 自动刷新失败，请手动刷新页面:', e);
+            }
+        }, 300);
+    }
+
+    // =========================
     // 兼容复制
     // =========================
     async function copyText(text) {
@@ -1116,8 +1180,10 @@
                     hideIndicator();
                     toast(describeStatus(st));
                     // 追加成功就刷新详情页，让新评论显示出来
+                    // （refreshPage 走前端路由重渲染，不是 location.reload()：
+                    //   App 端整页重载会把 WebView 里的文档连同原生桥一起拆掉，直接闪退）
                     if (st.Appended) {
-                        setTimeout(() => location.reload(), 1500);
+                        setTimeout(refreshPage, 1500);
                     }
                     return;
                 }
@@ -1233,7 +1299,7 @@
                 toast(`✅ ${result?.Message || `已拆分并标记 ${ids.length} 个版本`}`);
             }
 
-            setTimeout(() => location.reload(), 1500);
+            setTimeout(refreshPage, 1500);
         } catch (e) {
             console.error('[JAV MENU] 拆分版本失败:', e);
             toast(`❌ 拆分失败: ${e.message || e}`);
@@ -1250,7 +1316,7 @@
                 return;
             }
             toast(`✅ ${result?.Message || '已取消标记'}`);
-            setTimeout(() => location.reload(), 1200);
+            setTimeout(refreshPage, 1200);
         } catch (e) {
             console.error('[JAV MENU] 取消拆分标记失败:', e);
             toast(`❌ 取消标记失败: ${e.message || e}`);
@@ -1397,7 +1463,7 @@
                 toast(`⚠️ 已执行，但${parts.join('、')}`);
             }
 
-            setTimeout(() => location.reload(), 1500);
+            setTimeout(refreshPage, 1500);
         } catch (e) {
             hideIndicator();
             console.error('[JAV MENU] 移除所有数据失败:', e);
