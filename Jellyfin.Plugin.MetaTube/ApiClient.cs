@@ -275,15 +275,16 @@ public static class ApiClient
     /// 重复率 71%（例如「上原亜衣」一轮里被查了 203 次），每次都白等 3 秒多。
     ///
     /// 这里按「关键词 + provider + fallback」缓存**成功且非空**的结果：
-    /// 10 分钟内有访问就续期，连续 10 分钟没人用到才真正过期。
-    /// 这样批量刮削期间缓存一直有效，刮完闲置 10 分钟后自动释放，不会长期占内存、也不会让数据变陈旧。
+    /// 24 小时内有访问就续期，连续 24 小时没人用到才真正过期。
+    /// 演员资料本身变化极慢，长 TTL 让反复刮削/浏览详情页时基本不再触发远程查询；
+    /// 内存占用由下面的容量上限兜底（满了先清过期项、再按最久未用淘汰）。
     ///
-    /// 空结果与异常不缓存：演员「未搜到」可能只是临时故障，固化成 10 分钟会掩盖真实问题。
+    /// 空结果与异常不缓存：演员「未搜到」可能只是临时故障，固化下来会掩盖真实问题。
     /// </summary>
     private static readonly ConcurrentDictionary<string, ActorSearchCacheEntry> ActorSearchCache = new();
 
     /// <summary>缓存空闲过期时间：期间每次命中都会续期（滑动过期）。</summary>
-    private static readonly TimeSpan ActorSearchCacheTtl = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan ActorSearchCacheTtl = TimeSpan.FromHours(24);
 
     /// <summary>缓存条目上限，防止长时间运行无限增长。</summary>
     private const int ActorSearchCacheCapacity = 5000;
@@ -310,7 +311,7 @@ public static class ApiClient
         var now = DateTime.UtcNow.Ticks;
         if (now - Interlocked.Read(ref entry.LastAccessTicks) > ActorSearchCacheTtl.Ticks)
         {
-            // 空闲超过 10 分钟：真正过期，删掉。
+            // 空闲超过 24 小时：真正过期，删掉。
             ActorSearchCache.TryRemove(key, out _);
             return false;
         }
