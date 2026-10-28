@@ -3,6 +3,7 @@
  * - 桌面：指针停在卡片上「静止」HOVER_DELAY 后播放（用轮询判定静止，不依赖 mouseover 事件序列）
  * - 移动端：长按 ~500ms 后播放，并吞掉随后的 click（避免跳转详情页）
  * - 首次播放需要服务端现场生成，期间显示"生成中"提示；失败会显示原因
+ * - 服务端预览开关关闭时（Status=None）完全静默：不弹任何提示，也不再继续请求
  * - VR 左右分屏（宽高比≈2:1）自动只显示左眼
  * - 调试：控制台执行 window.__embyHoverPreviewDebug = true 后可见判定日志
  */
@@ -12,7 +13,7 @@
     if (window.__embyHoverPreviewInstalled) return;
     window.__embyHoverPreviewInstalled = true;
     /* 版本戳（排查用）：控制台执行 window.__embyHoverPreviewVersion 看当前加载的是哪一版 */
-    window.__embyHoverPreviewVersion = '2026-10-25 19:40 wrap-teardown';
+    window.__embyHoverPreviewVersion = '2026-10-25 20:05 silent-when-disabled';
 
     var TARGET_SELECTOR = '.itemsContainer .cardOverlayContainer';
     var CARD_SELECTOR = '.itemsContainer .card';  // 命中区用整张卡片，数据仍从 overlay 上取
@@ -23,6 +24,8 @@
     var MOVE_TOLERANCE = 12;    // 长按期间允许的抖动像素
     var POLL_INTERVAL = 2500;   // 轮询生成状态的间隔
     var POLL_TIMEOUT = 180000;  // 最长等待
+    var HINT_DELAY = 260;       // 请求返回前不弹提示，避免"开关关着还闪一下"
+    var DISABLED_TTL = 60000;   // 判定服务端已关闭后，多久内不再发请求（1 分钟，便于重新开启后自愈）
 
     var CSS = [
         '.emby-preview-wrap {',
@@ -126,9 +129,48 @@
         } catch (e) { /* ignore */ }
     }
 
+    /* ---------------- 服务端开关 ---------------- */
+
+    /* PreviewClipApi.RequestGenerate 只在 PreviewClipOptions.Enable=false 时返回 None，
+       所以 POST 拿到 None 就等于"预览开关被关掉"。
+       关掉后按要求鼠标悬停不做任何提示；同时一段时间内连请求也不发
+       （否则每张卡悬停都会打一次接口），状态记在 sessionStorage 里，
+       同一标签页刷新也不用重新探测。 */
+    var DISABLED_KEY = '__embyHoverPreviewDisabledUntil';
+    var disabledUntil = 0;
+
+    (function restoreDisabled() {
+        try {
+            var v = window.sessionStorage && window.sessionStorage.getItem(DISABLED_KEY);
+            if (v) disabledUntil = parseInt(v, 10) || 0;
+        } catch (e) { /* 隐私模式/禁用 storage，忽略 */ }
+    })();
+
+    function previewDisabled() {
+        return Date.now() < disabledUntil;
+    }
+
+    function markPreviewDisabled() {
+        disabledUntil = Date.now() + DISABLED_TTL;
+        try {
+            if (window.sessionStorage) {
+                window.sessionStorage.setItem(DISABLED_KEY, String(disabledUntil));
+            }
+        } catch (e) { /* ignore */ }
+
+        trace('服务端预览开关已关闭，静默停用');
+    }
+
     /* ---------------- 播放 ---------------- */
 
-    var current = null; // { overlay, wrap, hint, timer, pollTimer, id }
+    var current = null; // { overlay, wrap, hint, hintTimer, timer, pollTimer, id }
+
+    function clearHintTimer() {
+        if (current && current.hintTimer) {
+            clearTimeout(current.hintTimer);
+            current.hintTimer = null;
+        }
+    }
 
     function stopVideoIn(wrap) {
         var video = wrap.querySelector('video');
@@ -155,6 +197,7 @@
         current = null;
 
         if (state) {
+            if (state.hintTimer) clearTimeout(state.hintTimer);
             if (state.timer) clearTimeout(state.timer);
             if (state.pollTimer) clearTimeout(state.pollTimer);
 
@@ -305,7 +348,12 @@
             .then(function (status) {
                 if (!current || current.overlay !== overlay) return;
 
-                if (status && status.Status === 'Ready') {
+                if (status && status.Status === 'None') {
+                    /* 轮询期间变 None：可能是开关被关掉，也可能是服务端"有人在播放就先不生成"
+                       （SkipWhilePlaying）。两种情况都静默收尾，不弹提示；
+                       这里不标记全局关闭，否则正在播放时会把之后 1 分钟的悬停全部压掉。 */
+                    teardown();
+                } else if (status && status.Status === 'Ready') {
                     playClip(overlay, id);
                 } else if (status && status.Status === 'Failed') {
                     failHint(overlay, status, '预览不可用');
@@ -329,26 +377,38 @@
         return card.querySelector('.cardOverlayContainer') || card;
     }
 
+    /* 触发一次预览请求；返回 false 表示压根没发请求（开关关闭 / 取不到条目） */
     function start(overlay) {
-        if (!getApiClient()) return;
+        if (previewDisabled()) return false;
+        if (!getApiClient()) return false;
 
         var id = getItemId(overlay);
-        if (!id) return;
+        if (!id) return false;
+
+        var url = buildUrl('StrmAssistant/Preview/' + encodeURIComponent(id));
+        if (!url) return false;
 
         teardown();
         current = { overlay: overlay, id: id };
 
-        showHint(overlay, '加载预览…');
-
-        var url = buildUrl('StrmAssistant/Preview/' + encodeURIComponent(id));
-        if (!url) { teardown(); return; }
+        /* 提示延后一点再显示：请求很快回来（尤其是开关关掉返回 None）时
+           根本不需要让用户看到"加载预览…"闪一下。 */
+        current.hintTimer = setTimeout(function () {
+            if (!current || current.overlay !== overlay) return;
+            showHint(overlay, '加载预览…');
+        }, HINT_DELAY);
 
         fetch(url, { method: 'POST', credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
             .then(function (status) {
                 if (!current || current.overlay !== overlay) return;
+                clearHintTimer();
 
-                if (status && status.Status === 'Ready') {
+                if (status && status.Status === 'None') {
+                    /* 服务端预览开关关闭：完全静默（不提示、不报错），并暂停后续探测 */
+                    markPreviewDisabled();
+                    teardown();
+                } else if (status && status.Status === 'Ready') {
                     playClip(overlay, id);
                 } else if (status && (status.Status === 'Queued' || status.Status === 'Generating')) {
                     showHint(overlay, status.Status === 'Generating' ? '预览生成中…' : '预览排队中…');
@@ -358,11 +418,16 @@
                 } else if (status && status.Status === 'Failed') {
                     failHint(overlay, status, '预览不可用');
                 } else {
-                    /* 未知状态（功能未启用时服务端可能返回 None），也给出可见反馈 */
-                    failHint(overlay, { Error: status ? '服务端状态 ' + status.Status : '无响应' }, '预览不可用');
+                    failHint(overlay, { Error: status && status.Status ? '服务端状态 ' + status.Status : '预览接口无响应' }, '预览不可用');
                 }
             })
-            .catch(function () { failHint(overlay, { Error: '请求预览接口失败' }, '预览不可用'); });
+            .catch(function () {
+                if (!current || current.overlay !== overlay) return;
+                clearHintTimer();
+                failHint(overlay, { Error: '请求预览接口失败' }, '预览不可用');
+            });
+
+        return true;
     }
 
     /* ---------------- 桌面：指针"静止"在卡片上才触发 ----------------
@@ -477,6 +542,7 @@
         if (Date.now() - pointer.ts < HOVER_DELAY) return;  // 还在动，继续等
         if (!card) { armedCard = null; return; }
         if (card === armedCard) return;                     // 这张已经处理过
+        if (previewDisabled()) return;                      // 服务端开关关闭：悬停什么都不做
 
         var overlay = card.querySelector('.cardOverlayContainer') || card;
         var id = getItemId(overlay);
@@ -510,6 +576,7 @@
 
     document.addEventListener('pointerdown', function (e) {
         if (e.pointerType === 'mouse') return;
+        if (previewDisabled()) return;
 
         var overlay = overlayOf(e.target);
         if (!overlay) return;
@@ -521,9 +588,10 @@
 
         pressTimer = setTimeout(function () {
             if (!pressOverlay) return;
+            if (previewDisabled()) return;
 
-            suppressClickUntil = Date.now() + 1200;
-            start(pressOverlay);
+            /* 只有真的发起了请求才吞掉随后的 click，否则开关关着时长按后点不开条目 */
+            if (start(pressOverlay)) suppressClickUntil = Date.now() + 1200;
         }, LONGPRESS_DELAY);
     }, true);
 
