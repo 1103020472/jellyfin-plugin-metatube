@@ -54,6 +54,8 @@ internal sealed class TranslationFormDto
 
     public bool EnableCheck { get; set; }
 
+    public string LocalProviderId { get; set; } = string.Empty;
+
     public string PrimaryProviderId { get; set; } = string.Empty;
 
     public string SensitiveFallbackProviderId { get; set; } = string.Empty;
@@ -77,6 +79,7 @@ internal sealed class TranslationFormDto
             MaxTranslationConcurrency = options.MaxTranslationConcurrency,
             RequestTimeoutSeconds = options.RequestTimeoutSeconds,
             EnableCheck = options.EnableCheck,
+            LocalProviderId = options.LocalProviderId,
             PrimaryProviderId = options.PrimaryProviderId,
             SensitiveFallbackProviderId = options.SensitiveFallbackProviderId,
             TimeoutFallbackProviderId = options.TimeoutFallbackProviderId,
@@ -103,6 +106,7 @@ internal sealed class TranslationFormDto
             var looksLikeTranslation = root.TryGetProperty(nameof(Mode), out _)
                                        || root.TryGetProperty(nameof(Engine), out _)
                                        || root.TryGetProperty(nameof(MaxChunkSize), out _)
+                                       || root.TryGetProperty(nameof(LocalProviderId), out _)
                                        || root.TryGetProperty(nameof(PrimaryProviderId), out _)
                                        || root.TryGetProperty(nameof(SensitiveFallbackProviderId), out _)
                                        || root.TryGetProperty(nameof(TimeoutFallbackProviderId), out _);
@@ -121,6 +125,8 @@ internal sealed class TranslationFormDto
             if (root.TryGetProperty(nameof(RequestTimeoutSeconds), out _))
                 result.RequestTimeoutSeconds = parsed.RequestTimeoutSeconds;
             if (root.TryGetProperty(nameof(EnableCheck), out _)) result.EnableCheck = parsed.EnableCheck;
+            if (root.TryGetProperty(nameof(LocalProviderId), out _))
+                result.LocalProviderId = parsed.LocalProviderId ?? string.Empty;
             if (root.TryGetProperty(nameof(PrimaryProviderId), out _))
                 result.PrimaryProviderId = parsed.PrimaryProviderId ?? string.Empty;
             if (root.TryGetProperty(nameof(SensitiveFallbackProviderId), out _))
@@ -150,6 +156,7 @@ internal sealed class TranslationFormDto
         options.MaxTranslationConcurrency = MaxTranslationConcurrency;
         options.RequestTimeoutSeconds = RequestTimeoutSeconds;
         options.EnableCheck = EnableCheck;
+        options.LocalProviderId = LocalProviderId ?? string.Empty;
         options.PrimaryProviderId = PrimaryProviderId ?? string.Empty;
         options.SensitiveFallbackProviderId = SensitiveFallbackProviderId ?? string.Empty;
         options.TimeoutFallbackProviderId = TimeoutFallbackProviderId ?? string.Empty;
@@ -172,7 +179,7 @@ internal sealed class TranslationEditModel : EditableOptionsBase
     public override string EditorTitle => "翻译";
 
     public override string EditorDescription =>
-        "OpenAI 兼容通道支持配置多个 Provider：选一个主通道，再分别指定敏感词备用与超时备用。";
+        "OpenAI 兼容通道支持配置多个 Provider：可选的本地优先通道（L）、主通道（A），以及敏感词备用（B）与超时备用（C）。";
 
     // ===== 基础字段：交给基类反射生成 =====
 
@@ -213,6 +220,8 @@ internal sealed class TranslationEditModel : EditableOptionsBase
     public bool EnableCheck { get; set; }
 
     // ===== 路由字段：通过自定义下拉控件渲染，禁止基类重复生成 =====
+
+    [Browsable(false)] public string LocalProviderId { get; set; } = string.Empty;
 
     [Browsable(false)] public string PrimaryProviderId { get; set; } = string.Empty;
 
@@ -262,6 +271,9 @@ internal sealed class TranslationEditModel : EditableOptionsBase
 
         var routeItems = new List<EditorBase>
         {
+            BuildRouteSelect(nameof(LocalProviderId), "本地 Provider（优先）",
+                "配置后先走这个通道（例如本地 Ollama）。它报错、返回空或拒答文案时自动降级到主 Provider A，"
+                + "再由 A 决定是否走 B / C。留空则不启用。", parentId),
             BuildRouteSelect(nameof(PrimaryProviderId), "主 Provider（A）",
                 "正常翻译使用的通道；A 请求失败 / 超时时从这里开始判断。", parentId),
             BuildRouteSelect(nameof(SensitiveFallbackProviderId), "敏感词备用（B）",
@@ -405,6 +417,7 @@ internal sealed class TranslationTabView : PluginTabPageView
             RequestTimeoutSeconds = dto.RequestTimeoutSeconds,
             EnableCheck = dto.EnableCheck,
             BackupRefusalPatterns = dto.BackupRefusalPatterns,
+            LocalProviderId = dto.LocalProviderId,
             PrimaryProviderId = dto.PrimaryProviderId,
             SensitiveFallbackProviderId = dto.SensitiveFallbackProviderId,
             TimeoutFallbackProviderId = dto.TimeoutFallbackProviderId,
@@ -424,12 +437,12 @@ internal sealed class TranslationTabView : PluginTabPageView
                 IsVisible = true,
                 Text = providers.Count == 0
                     ? "还没有配置任何 Provider。点下面的「新增 Provider」添加第一个 OpenAI 兼容通道。"
-                    : $"共 {providers.Count} 个 Provider。主通道 A 失败时，只有 B / C 会在各自条件下重试一次。"
+                    : $"共 {providers.Count} 个 Provider。配了「本地 Provider（优先）」就先走它，失败后回落主通道 A，再由 A 决定是否走 B / C。"
             },
             RouteHint = new LabelItem
             {
                 IsVisible = true,
-                Text = message ?? "敏感词只切 B，超时只切 C；B 或 C 再失败就直接报错，不会继续降级。"
+                Text = message ?? "L 失败 / 空结果一律回落 A；A 之后：敏感词只切 B，超时只切 C；B 或 C 再失败就直接报错。"
             }
         };
     }

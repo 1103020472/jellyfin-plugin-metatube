@@ -371,6 +371,15 @@ public class TranslationOptions
     /// <summary>所有 OpenAI 兼容通道。</summary>
     public List<TranslationProvider> Providers { get; set; } = new();
 
+    /// <summary>
+    /// 本地优先通道（L）的 Provider.Id；留空表示不启用。
+    ///
+    /// L 只负责「抢先试一次」：命中就直接返回；L 抛任何异常（连接失败、404 model not found、
+    /// 超时……）、返回空串、或返回拒答文案时，立刻降级到主通道 A，由 A 继续走原来的 B / C 逻辑。
+    /// 也就是说 L 是 A 前面的一个可选前置，不改变 A 之后的路由语义。
+    /// </summary>
+    public string LocalProviderId { get; set; } = string.Empty;
+
     /// <summary>主通道（A）的 Provider.Id。</summary>
     public string PrimaryProviderId { get; set; } = string.Empty;
 
@@ -507,9 +516,15 @@ public class TranslationOptions
                     : provider.Model;
         }
 
+        LocalProviderId = (LocalProviderId ?? string.Empty).Trim();
         PrimaryProviderId = (PrimaryProviderId ?? string.Empty).Trim();
         SensitiveFallbackProviderId = (SensitiveFallbackProviderId ?? string.Empty).Trim();
         TimeoutFallbackProviderId = (TimeoutFallbackProviderId ?? string.Empty).Trim();
+
+        // L 与 A 相同时不做静默清空（避免用户改了 A 之后 L 莫名消失），
+        // 运行期由 GetLocalProvider 返回 null 视作未启用。
+        if (FindProvider(LocalProviderId) == null)
+            LocalProviderId = string.Empty;
 
         if (FindProvider(PrimaryProviderId) == null)
             PrimaryProviderId = Providers.FirstOrDefault()?.Id ?? string.Empty;
@@ -529,6 +544,12 @@ public class TranslationOptions
 
         return Providers?.FirstOrDefault(p =>
             p != null && string.Equals(p.Id, id.Trim(), StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>本地优先通道（L）；未配置、或与主通道是同一个 Provider 时返回 null（视作未启用）。</summary>
+    public TranslationProvider GetLocalProvider(TranslationProvider primary)
+    {
+        return ResolveFallback(LocalProviderId, primary);
     }
 
     /// <summary>主通道；未显式选择时退化为列表第一个。</summary>

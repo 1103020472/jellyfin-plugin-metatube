@@ -288,6 +288,8 @@ public static class TranslationHelper
 
     /// <summary>
     /// 单次翻译的通道计划：
+    ///   * <see cref="Local"/>：L，可选的前置通道（本地模型）。命中直接用；
+    ///     抛任何异常 / 返回空串 / 返回拒答文案时降级到 A，不影响 A 之后的判断；
     ///   * <see cref="Primary"/>：A，永远存在；
     ///   * <see cref="SensitiveFallback"/>：B，A 返回拒答文案 / 接口报内容审核错误时用一次；
     ///   * <see cref="TimeoutFallback"/>：C，A 超时时用一次。
@@ -297,6 +299,9 @@ public static class TranslationHelper
     /// </summary>
     private sealed class TranslationPlan
     {
+        /// <summary>本地优先通道（L）；null 表示未配置，直接走 A。</summary>
+        public TranslationAttempt Local { get; set; }
+
         public TranslationAttempt Primary { get; set; }
 
         public TranslationAttempt SensitiveFallback { get; set; }
@@ -330,6 +335,33 @@ public static class TranslationHelper
 
             var context = $"{title}#{chunkIndex}({q?.Length ?? 0}chars)";
             string translated;
+
+            // L（本地优先通道）：只抢一次，且不重试——它挂了就该立刻让给 A。
+            // 异常（连接失败 / 404 model not found / 超时）、空结果、拒答文案，
+            // 三种情况都降级到 A，A 之后照旧走 B（敏感词）/ C（超时）。
+            if (plan.Local != null)
+            {
+                try
+                {
+                    var local = await RetryAsync(() => AttemptAsync(plan.Local, " [local]"), 1,
+                        context + " [local]", cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(local) && !IsRefusalPlaceholder(local))
+                        return local;
+
+                    LogWarn("Local provider returned empty/refusal ({0}) via {1}, falling back to primary {2}.",
+                        context, plan.Local.Name, plan.Primary.Name);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    // 用户 / 上层主动取消：不要误判成 L 故障去降级。
+                    throw;
+                }
+                catch (Exception e)
+                {
+                    LogWarn("Local provider failed ({0}) via {1}, falling back to primary {2}: {3}",
+                        context, plan.Local.Name, plan.Primary.Name, e.Message);
+                }
+            }
 
             try
             {
@@ -422,6 +454,7 @@ public static class TranslationHelper
 
             return new TranslationPlan
             {
+                Local = BuildProviderAttempt(Configuration.Translation.GetLocalProvider(primary), 0),
                 Primary = BuildProviderAttempt(primary, 10),
                 SensitiveFallback =
                     BuildProviderAttempt(Configuration.Translation.GetSensitiveFallbackProvider(primary), 0),
