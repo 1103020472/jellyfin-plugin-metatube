@@ -502,6 +502,8 @@ public class TranslationOptions
                 provider.MaxCompletionTokens = 0;
 
             provider.TimeoutSeconds = Math.Clamp(provider.TimeoutSeconds, 0, 7200);
+            provider.FailureCooldownMinutes = Math.Clamp(provider.FailureCooldownMinutes, 0,
+                TranslationProvider.MaxFailureCooldownMinutes);
 
             // 没有 Id（手工编辑 JSON 时常见）或 Id 重复：生成一个稳定可用的新 Id。
             if (provider.Id.Length == 0 || !seen.Add(provider.Id))

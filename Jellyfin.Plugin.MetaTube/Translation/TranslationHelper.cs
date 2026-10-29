@@ -275,6 +275,18 @@ public static class TranslationHelper
     {
         public string Name { get; set; } = string.Empty;
 
+        /// <summary>
+        /// 通道身份（Provider.Id + 地址 + 模型）。只有 L 用得到：
+        /// 冷却状态按这个值记账，换了 Provider / 改了地址就自动作废旧结论。
+        /// </summary>
+        public string Key { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 失败后的冷却时长；<see cref="TimeSpan.Zero"/> 表示不冷却。
+        /// 目前只有 L 会用到：A 必须每次都真的去请求，不能因为上一次失败就跳过。
+        /// </summary>
+        public TimeSpan Cooldown { get; set; } = TimeSpan.Zero;
+
         public string Engine { get; set; } = string.Empty;
 
         public NameValueCollection Parameters { get; set; }
@@ -339,27 +351,61 @@ public static class TranslationHelper
             // L（本地优先通道）：只抢一次，且不重试——它挂了就该立刻让给 A。
             // 异常（连接失败 / 404 model not found / 超时）、空结果、拒答文案，
             // 三种情况都降级到 A，A 之后照旧走 B（敏感词）/ C（超时）。
+            //
+            // 失败过一次后会按 Provider 的「失败冷却」跳过 L，直接走 A：
+            // 主机没开机时不必让每个分片都去撞一次连不通的地址。
             if (plan.Local != null)
             {
-                try
-                {
-                    var local = await RetryAsync(() => AttemptAsync(plan.Local, " [local]"), 1,
-                        context + " [local]", cancellationToken);
-                    if (!string.IsNullOrWhiteSpace(local) && !IsRefusalPlaceholder(local))
-                        return local;
+                var localKey = plan.Local.Key;
+                var ticket = LocalChannelBreaker.Enter(localKey, plan.Local.Cooldown);
 
-                    LogWarn("Local provider returned empty/refusal ({0}) via {1}, falling back to primary {2}.",
-                        context, plan.Local.Name, plan.Primary.Name);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                if (!ticket.Allowed)
                 {
-                    // 用户 / 上层主动取消：不要误判成 L 故障去降级。
-                    throw;
+                    if (ticket.AnnounceSkip)
+                        LogInfo("Local provider {0} is cooling down ({1:0.#} min left), skipping it and going straight to primary {2}.",
+                            plan.Local.Name, ticket.Remaining.TotalMinutes, plan.Primary.Name);
                 }
-                catch (Exception e)
+                else
                 {
-                    LogWarn("Local provider failed ({0}) via {1}, falling back to primary {2}: {3}",
-                        context, plan.Local.Name, plan.Primary.Name, e.Message);
+                    try
+                    {
+                        var local = await RetryAsync(() => AttemptAsync(plan.Local, " [local]"), 1,
+                            context + " [local]", cancellationToken);
+
+                        // 拿到响应就算端点可用：空结果 / 拒答是这一片的内容问题，不该触发冷却。
+                        LocalChannelBreaker.ReportSuccess(localKey);
+
+                        if (!string.IsNullOrWhiteSpace(local) && !IsRefusalPlaceholder(local))
+                            return local;
+
+                        LogWarn("Local provider returned empty/refusal ({0}) via {1}, falling back to primary {2}.",
+                            context, plan.Local.Name, plan.Primary.Name);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        // 用户 / 上层主动取消：不要误判成 L 故障去降级，也不该触发冷却。
+                        LocalChannelBreaker.Abandon(localKey);
+                        throw;
+                    }
+                    catch (Exception e)
+                    {
+                        if (IsSensitiveError(e))
+                        {
+                            // 内容审核类错误是「这一片不能翻」，不是端点不可用。
+                            LocalChannelBreaker.Abandon(localKey);
+                            LogWarn("Local provider rejected content ({0}) via {1}, falling back to primary {2}: {3}",
+                                context, plan.Local.Name, plan.Primary.Name, e.Message);
+                        }
+                        else
+                        {
+                            LocalChannelBreaker.ReportFailure(localKey, plan.Local.Cooldown);
+                            LogWarn("Local provider failed ({0}) via {1}, falling back to primary {2}: {3}"
+                                    + (plan.Local.Cooldown > TimeSpan.Zero
+                                        ? $" Next {plan.Local.Cooldown.TotalMinutes:0.#} min will skip it."
+                                        : string.Empty),
+                                context, plan.Local.Name, plan.Primary.Name, e.Message);
+                        }
+                    }
                 }
             }
 
@@ -483,6 +529,12 @@ public static class TranslationHelper
         return new TranslationAttempt
         {
             Name = string.IsNullOrWhiteSpace(provider.Name) ? "OpenAI Provider" : provider.Name,
+            // 冷却记账用：换了 Provider 或改了地址 / 模型就当作新通道，旧结论不再适用。
+            Key = $"{provider.Id}|{provider.ApiUrl}|{provider.Model}",
+            Cooldown = provider.FailureCooldownMinutes > 0
+                ? TimeSpan.FromMinutes(Math.Clamp(provider.FailureCooldownMinutes, 1,
+                    TranslationProvider.MaxFailureCooldownMinutes))
+                : TimeSpan.Zero,
             Engine = nameof(TranslationEngine.OpenAi),
             Parameters = new NameValueCollection
             {

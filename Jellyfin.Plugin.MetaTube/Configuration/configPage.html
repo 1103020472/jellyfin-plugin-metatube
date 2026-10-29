@@ -470,6 +470,11 @@
                         <input is="emby-input" class="emby-input p-timeout" type="number" min="0" max="7200"/>
                         <div class="fieldDescription">0 = 使用上面的全局 API 超时；A 超时后才会切到 C。</div>
                     </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused">失败冷却（分钟）:</label>
+                        <input is="emby-input" class="emby-input p-cooldown" type="number" min="0" max="1440"/>
+                        <div class="fieldDescription">仅当它被选为「本地 Provider（优先）」时生效：连不通后这段时间内直接跳过它走主通道，避免每个分片都去撞一次。默认 10，0 = 不冷却。</div>
+                    </div>
                 </div>
             </template>
         </div>
@@ -625,6 +630,8 @@
                     var maxTokens = provider.MaxCompletionTokens;
                     $card.find('.p-max-tokens').val(maxTokens === undefined || maxTokens === null ? 4096 : maxTokens);
                     $card.find('.p-timeout').val(provider.TimeoutSeconds || 0);
+                    var cooldown = provider.FailureCooldownMinutes;
+                    $card.find('.p-cooldown').val(cooldown === undefined || cooldown === null ? 10 : cooldown);
                     $list.append($card);
                 });
 
@@ -670,6 +677,9 @@
             }
 
             function syncFromDom() {
+                // 保留上一轮的完整对象再覆盖已知字段：这个页面只渲染了部分字段，
+                // 直接重建会把没渲染的字段（提示词模式等）静默丢成默认值。
+                var previous = providers;
                 providers = [];
                 $('#translationProviderList .translation-provider-card').each(function () {
                     var $card = $(this);
@@ -679,7 +689,17 @@
                         $card.attr('data-provider-id', id);
                     }
 
-                    providers.push({
+                    var prev = {};
+                    for (var i = 0; i < previous.length; i++) {
+                        if (previous[i].Id === id) {
+                            prev = previous[i];
+                            break;
+                        }
+                    }
+
+                    var cooldown = parseInt($card.find('.p-cooldown').val(), 10);
+
+                    providers.push($.extend({}, prev, {
                         Id: id,
                         Name: $card.find('.p-name').val().trim(),
                         ApiUrl: $card.find('.p-api-url').val().trim(),
@@ -688,8 +708,9 @@
                         Translator: $card.find('.p-translator').val() || 'OpenAiTranslator',
                         ExtraParams: $card.find('.p-extra-params').val() || '',
                         MaxCompletionTokens: parseInt($card.find('.p-max-tokens').val(), 10) || 0,
-                        TimeoutSeconds: parseInt($card.find('.p-timeout').val(), 10) || 0
-                    });
+                        TimeoutSeconds: parseInt($card.find('.p-timeout').val(), 10) || 0,
+                        FailureCooldownMinutes: isNaN(cooldown) ? 10 : cooldown
+                    }));
                 });
             }
 
@@ -710,7 +731,8 @@
                     Translator: 'OpenAiTranslator',
                     ExtraParams: '',
                     MaxCompletionTokens: 4096,
-                    TimeoutSeconds: 0
+                    TimeoutSeconds: 0,
+                    FailureCooldownMinutes: 10
                 });
                 render();
             }

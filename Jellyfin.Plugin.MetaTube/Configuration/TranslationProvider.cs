@@ -57,6 +57,25 @@ public class TranslationProvider
     /// </summary>
     public int TimeoutSeconds { get; set; }
 
+    /// <summary>
+    /// 请求失败后的冷却时间（分钟）；0 = 不冷却。
+    ///
+    /// 只在被选为「本地优先通道（L）」时生效。典型场景：本地模型跑在另一台电脑上，
+    /// 那台电脑没开机时 L 根本连不通，如果每个分片都先去撞一次，
+    /// 一次批量刮削要白等几百次连接失败/超时。冷却期内直接跳过 L 走主通道 A，
+    /// 到期后只放一个请求去探活，通了就恢复、再失败则重新计时。
+    ///
+    /// 只有「请求抛异常」（连接失败 / 超时 / 404 model not found）才算故障；
+    /// 空结果与拒答文案属于这一片的内容问题，不会触发冷却。
+    /// </summary>
+    public int FailureCooldownMinutes { get; set; } = DefaultFailureCooldownMinutes;
+
+    /// <summary>冷却时间默认值（分钟）。</summary>
+    public const int DefaultFailureCooldownMinutes = 10;
+
+    /// <summary>冷却时间上限（分钟）。</summary>
+    public const int MaxFailureCooldownMinutes = 1440;
+
     /// <summary>给日志 / 设置页用的简短描述。</summary>
     public string Describe()
     {

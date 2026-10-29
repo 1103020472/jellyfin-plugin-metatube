@@ -273,7 +273,8 @@ internal sealed class TranslationEditModel : EditableOptionsBase
         {
             BuildRouteSelect(nameof(LocalProviderId), "本地 Provider（优先）",
                 "配置后先走这个通道（例如本地 Ollama）。它报错、返回空或拒答文案时自动降级到主 Provider A，"
-                + "再由 A 决定是否走 B / C。留空则不启用。", parentId),
+                + "再由 A 决定是否走 B / C。报错后按该 Provider 的「失败冷却」跳过一段时间"
+                + "（本地机器没开机时不会让每个分片都去撞一次）。留空则不启用。", parentId),
             BuildRouteSelect(nameof(PrimaryProviderId), "主 Provider（A）",
                 "正常翻译使用的通道；A 请求失败 / 超时时从这里开始判断。", parentId),
             BuildRouteSelect(nameof(SensitiveFallbackProviderId), "敏感词备用（B）",
@@ -529,6 +530,8 @@ internal sealed class TranslationProviderFormDto
 
     public int TimeoutSeconds { get; set; }
 
+    public int FailureCooldownMinutes { get; set; } = TranslationProvider.DefaultFailureCooldownMinutes;
+
     public static TranslationProviderFormDto FromProvider(TranslationProvider provider)
     {
         if (provider == null)
@@ -545,7 +548,8 @@ internal sealed class TranslationProviderFormDto
             PromptMode = provider.PromptMode,
             ExtraParams = provider.ExtraParams,
             MaxCompletionTokens = provider.MaxCompletionTokens,
-            TimeoutSeconds = provider.TimeoutSeconds
+            TimeoutSeconds = provider.TimeoutSeconds,
+            FailureCooldownMinutes = provider.FailureCooldownMinutes
         };
     }
 
@@ -594,6 +598,8 @@ internal sealed class TranslationProviderFormDto
         provider.ExtraParams = ExtraParams ?? string.Empty;
         provider.MaxCompletionTokens = MaxCompletionTokens < 0 ? 0 : MaxCompletionTokens;
         provider.TimeoutSeconds = Math.Clamp(TimeoutSeconds, 0, 7200);
+        provider.FailureCooldownMinutes = Math.Clamp(FailureCooldownMinutes, 0,
+            TranslationProvider.MaxFailureCooldownMinutes);
 
         configuration.EnsureTranslationProvidersMigrated();
         Plugin.Instance.SaveConfiguration(configuration);
@@ -655,6 +661,15 @@ internal sealed class TranslationProviderFormModel : EditableOptionsBase
     [MaxValue(7200)]
     public int TimeoutSeconds { get; set; }
 
+    [DisplayName("失败冷却（分钟）")]
+    [Description(
+        "仅当本 Provider 被选为「本地 Provider（优先）」时生效：请求报错（连不通 / 超时 / 模型不存在）后，"
+        + "这段时间内直接跳过它走主通道 A，避免每个分片都去撞一次连不通的地址。"
+        + "到期后只放一个请求去探活，通了就恢复。默认 10，0 = 不冷却。")]
+    [MinValue(0)]
+    [MaxValue(1440)]
+    public int FailureCooldownMinutes { get; set; } = TranslationProvider.DefaultFailureCooldownMinutes;
+
     [Browsable(false)] public ButtonItem SaveButton { get; set; } = new();
 
     [Browsable(false)] public ButtonItem CancelButton { get; set; } = new();
@@ -673,6 +688,7 @@ internal sealed class TranslationProviderFormModel : EditableOptionsBase
         ExtraParams = dto.ExtraParams;
         MaxCompletionTokens = dto.MaxCompletionTokens;
         TimeoutSeconds = dto.TimeoutSeconds;
+        FailureCooldownMinutes = dto.FailureCooldownMinutes;
     }
 
     public override IEditObjectContainer CreateEditContainer()
@@ -767,7 +783,8 @@ internal sealed class TranslationProviderFormTabView : PluginTabPageView
                 PromptMode = form.PromptMode,
                 ExtraParams = form.ExtraParams,
                 MaxCompletionTokens = form.MaxCompletionTokens,
-                TimeoutSeconds = form.TimeoutSeconds
+                TimeoutSeconds = form.TimeoutSeconds,
+                FailureCooldownMinutes = form.FailureCooldownMinutes
             })
             : new TranslationProviderFormDto();
 
