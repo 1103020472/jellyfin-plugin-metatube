@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         4k2论坛帖子缩略图 + Emby检测（最终稳定版）
 // @namespace    http://tampermonkey.net/
-// @version      7.7
+// @version      7.8
 // @match        https://4k2.me/*
 // @match        https://4k2.com/*
 // @grant        GM_xmlhttpRequest
@@ -79,10 +79,30 @@
         return aliases;
     }
 
+    // 判断条目是否带外挂字幕流（内嵌字幕不算）。
+    function hasExternalSubtitle(item) {
+        const sources = item.MediaSources || [];
+        return sources.some(source =>
+            (source.MediaStreams || []).some(stream =>
+                stream.Type === "Subtitle" &&
+                (
+                    stream.IsExternal === true ||
+                    stream.Path ||
+                    stream.DeliveryMethod === "External"
+                )
+            )
+        );
+    }
+
+    // 只读查询：Fields=MediaSources 让列表接口一次带回媒体源（含字幕流），
+    // 不需要再单独请求 /Items/{id}/PlaybackInfo —— 那个接口会被 Emby 当成"要播放"，
+    // 服务端会登记一个播放会话，日志里就是
+    //   MediaInfoService: GetPostedPlaybackInfo request. IsPlayback: true
+    //   SessionManager: Adding playSession xxx to session yyy
     async function findEmbyMovie(alias) {
         const res = await GM_xmlhttpRequestPromise({
             method: "GET",
-            url: `${CONFIG.EMBY_BASE_URL}/emby/Items?IncludeItemTypes=Movie&Recursive=true&SearchTerm=${encodeURIComponent(alias)}`,
+            url: `${CONFIG.EMBY_BASE_URL}/emby/Items?IncludeItemTypes=Movie&Recursive=true&Fields=MediaSources&SearchTerm=${encodeURIComponent(alias)}`,
             headers: {
                 "X-Emby-Token": CONFIG.EMBY_API_KEY,
                 "Accept": "application/json"
@@ -93,11 +113,12 @@
         // Emby 的 SearchTerm 是模糊搜索；只认标题中实际包含番号的条目，
         // 避免把仅因年份/描述命中的影片误判为该番号。
         const normalizedCode = alias.toUpperCase();
-        return (data.Items || []).find(item =>
+        const item = (data.Items || []).find(item =>
             [item.Name, item.OriginalTitle].some(title =>
                 typeof title === 'string' && title.toUpperCase().includes(normalizedCode)
             )
-        ) || null;
+        );
+        return item ? { item, hasSubtitle: hasExternalSubtitle(item) } : null;
     }
 
     async function queryEmbyMovie(code) {
@@ -115,43 +136,19 @@
 
         const promise = enqueue(async () => {
             try {
-                let movie = null;
+                let found = null;
                 for (const alias of embySearchAliases(code)) {
-                    movie = await findEmbyMovie(alias);
-                    if (movie) break;
+                    found = await findEmbyMovie(alias);
+                    if (found) break;
                 }
-                if (!movie) {
+                if (!found) {
                     // 负结果也缓存：同一页面里徽标检查与后续批量流程会重复问同一个番号。
                     const miss = { exists: false, hasSubtitle: false };
                     embyCache.set(code, miss);
                     return miss;
                 }
 
-                let hasSubtitle = false;
-
-                try {
-                    const mediaRes = await GM_xmlhttpRequestPromise({
-                        method: "GET",
-                        url: `${CONFIG.EMBY_BASE_URL}/emby/Items/${movie.Id}/PlaybackInfo`,
-                        headers: { "X-Emby-Token": CONFIG.EMBY_API_KEY }
-                    });
-
-                    const mediaData = JSON.parse(mediaRes.responseText);
-                    const sources = mediaData.MediaSources || [];
-
-                    hasSubtitle = sources.some(source =>
-                        (source.MediaStreams || []).some(stream =>
-                            stream.Type === "Subtitle" &&
-                            (
-                                stream.IsExternal === true ||
-                                stream.Path ||
-                                stream.DeliveryMethod === "External"
-                            )
-                        )
-                    );
-                } catch {}
-
-                const result = { exists: true, hasSubtitle };
+                const result = { exists: true, hasSubtitle: found.hasSubtitle };
                 embyCache.set(code, result);
                 return result;
 
