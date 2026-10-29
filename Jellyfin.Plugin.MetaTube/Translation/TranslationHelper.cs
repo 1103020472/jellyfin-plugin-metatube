@@ -491,6 +491,8 @@ public static class TranslationHelper
                 { "openai-model", provider.Model ?? string.Empty },
                 // 由 SDK 根据该值选择 openai-translator / go-openai 实现。
                 { "openai-translator", provider.Translator.ToSdkValue() },
+                // 消息结构：default / single / system-single。非 default 时 SDK 自动升级到 go-openai。
+                { "openai-prompt-mode", provider.PromptMode.ToSdkValue() },
                 { "openai-extra-params", provider.ExtraParams ?? string.Empty },
                 { "openai-max-completion-tokens", provider.MaxCompletionTokens.ToString() }
             },

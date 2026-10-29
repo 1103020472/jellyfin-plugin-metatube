@@ -521,6 +521,8 @@ internal sealed class TranslationProviderFormDto
 
     public OpenAiTranslator Translator { get; set; }
 
+    public OpenAiPromptMode PromptMode { get; set; }
+
     public string ExtraParams { get; set; } = string.Empty;
 
     public int MaxCompletionTokens { get; set; } = 4096;
@@ -540,6 +542,7 @@ internal sealed class TranslationProviderFormDto
             ApiKey = provider.ApiKey,
             Model = provider.Model,
             Translator = provider.Translator,
+            PromptMode = provider.PromptMode,
             ExtraParams = provider.ExtraParams,
             MaxCompletionTokens = provider.MaxCompletionTokens,
             TimeoutSeconds = provider.TimeoutSeconds
@@ -587,6 +590,7 @@ internal sealed class TranslationProviderFormDto
         provider.ApiKey = (ApiKey ?? string.Empty).Trim();
         provider.Model = (Model ?? string.Empty).Trim();
         provider.Translator = Translator;
+        provider.PromptMode = PromptMode;
         provider.ExtraParams = ExtraParams ?? string.Empty;
         provider.MaxCompletionTokens = MaxCompletionTokens < 0 ? 0 : MaxCompletionTokens;
         provider.TimeoutSeconds = Math.Clamp(TimeoutSeconds, 0, 7200);
@@ -628,6 +632,13 @@ internal sealed class TranslationProviderFormModel : EditableOptionsBase
     [Description("openai-translator（默认）或 go-openai。只有 go-openai 会应用额外参数与最大 token。")]
     public OpenAiTranslator Translator { get; set; } = OpenAiTranslator.OpenAiTranslator;
 
+    [DisplayName("提示词模式")]
+    [Description(
+        "default：system + 指令 + 原文三段（历史行为）。single：指令与原文合并成一条，无 system —— 本地小模型建议选它，"
+        + "长分片下不容易翻错语言（实测 qwen 在 default 下会把日文翻成英文）。system-single：保留 system 但合并指令与原文。"
+        + "非 default 会自动改用 go-openai 实现。")]
+    public OpenAiPromptMode PromptMode { get; set; } = OpenAiPromptMode.Default;
+
     [DisplayName("额外参数 (JSON)")]
     [Description(
         "合并进 chat completion 请求体的额外 JSON 字段（仅 go-openai 生效）。SiliconFlow: {\"thinking_budget\": 1}；智谱: {\"thinking\": {\"type\": \"disabled\"}}。")]
@@ -658,6 +669,7 @@ internal sealed class TranslationProviderFormModel : EditableOptionsBase
         ApiKey = dto.ApiKey;
         Model = dto.Model;
         Translator = dto.Translator;
+        PromptMode = dto.PromptMode;
         ExtraParams = dto.ExtraParams;
         MaxCompletionTokens = dto.MaxCompletionTokens;
         TimeoutSeconds = dto.TimeoutSeconds;
@@ -752,6 +764,7 @@ internal sealed class TranslationProviderFormTabView : PluginTabPageView
                 ApiKey = form.ApiKey,
                 Model = form.Model,
                 Translator = form.Translator,
+                PromptMode = form.PromptMode,
                 ExtraParams = form.ExtraParams,
                 MaxCompletionTokens = form.MaxCompletionTokens,
                 TimeoutSeconds = form.TimeoutSeconds

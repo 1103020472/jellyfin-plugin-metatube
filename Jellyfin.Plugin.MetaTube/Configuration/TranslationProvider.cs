@@ -35,6 +35,15 @@ public class TranslationProvider
     /// <summary>翻译组件：openai-translator（默认）/ go-openai。</summary>
     public OpenAiTranslator Translator { get; set; } = OpenAiTranslator.OpenAiTranslator;
 
+    /// <summary>
+    /// 提示词组装方式（默认 default，三段结构）。
+    ///
+    /// 本地小模型建议选 single：指令与原文合并成一条消息，长分片下目标语言约束更强。
+    /// 实测 qwen3.5:9b 在 default 下会把某些 900+ 字符的日文评论分片翻成英文，
+    /// 同一分片换 single 后稳定输出中文。非 default 时 SDK 会自动改用 go-openai 实现。
+    /// </summary>
+    public OpenAiPromptMode PromptMode { get; set; } = OpenAiPromptMode.Default;
+
     /// <summary>合并进 chat completion 请求体的额外 JSON 字段（仅 go-openai 生效）。</summary>
     public string ExtraParams { get; set; } = string.Empty;
 
@@ -53,6 +62,8 @@ public class TranslationProvider
     {
         var model = string.IsNullOrWhiteSpace(Model) ? "默认模型" : Model.Trim();
         var timeout = TimeoutSeconds > 0 ? $"{TimeoutSeconds}s" : "全局超时";
-        return $"{model} · {timeout}";
+        // 只有非默认提示词模式才标出来，避免列表里全是噪音。
+        var mode = PromptMode == OpenAiPromptMode.Default ? string.Empty : $" · {PromptMode.ToSdkValue()}";
+        return $"{model} · {timeout}{mode}";
     }
 }
