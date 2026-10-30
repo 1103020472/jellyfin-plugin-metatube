@@ -63,7 +63,14 @@ public sealed class MergedActorInfo
 ///   * 只认替换表，不拿主记录自带的 aliases 当候选（用户要求，表里的名字是人工核过的）；
 ///   * 搜索结果必须二次校验：取回详情后，名字或别名归一化后要能对上，否则丢弃；
 ///   * 同一个别名最多核对 <see cref="MaxCandidatesPerAlias"/> 个候选，避免无限翻页；
-///   * 单个别名 5 秒超时、整轮 12 秒预算、条数上限全部可配，失败只降级不报错。
+///   * 单个别名 8 秒超时、整轮 20 秒预算、条数上限全部可配，失败只降级不报错。
+///
+/// 缓存策略（踩过坑，别乱改）：
+///   * 合并到数据（至少 1 字段或 1 张图）→ 缓存 30 分钟；
+///   * 「干净的空结果」（别名都查完了，源站确实没有）→ 只缓存 5 分钟；
+///   * 有任何一次超时 / 网络失败 → **完全不缓存**，下次请求立刻重试。
+/// 之前无差别缓存 30 分钟，结果一次 5 秒超时就把这个演员锁死半小时：
+/// 后面刷新全是缓存里的"没有别名数据"，日志也一个字不打印，看起来像功能没生效。
 /// </summary>
 public static class ActorAliasMerger
 {
@@ -73,14 +80,17 @@ public static class ActorAliasMerger
     /// <summary>默认最多凑几个「有数据」的别名。</summary>
     public const int DefaultMaxHits = 3;
 
-    /// <summary>单个别名的搜索 / 取详情超时。</summary>
-    private static readonly TimeSpan AliasTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>单个别名的搜索 / 取详情超时（源站搜索实测 2~4 秒，偶尔更久，5 秒太紧）。</summary>
+    private static readonly TimeSpan AliasTimeout = TimeSpan.FromSeconds(8);
 
     /// <summary>整轮合并的时间预算：超了就不再往下试，宁可少合并也不要拖死演员页。</summary>
-    private static readonly TimeSpan TotalBudget = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan TotalBudget = TimeSpan.FromSeconds(20);
 
-    /// <summary>合并结果缓存时长（演员资料变化极慢，页面来回切换不该每次都重查）。</summary>
+    /// <summary>合并到数据时的缓存时长（演员资料变化极慢，页面来回切换不该每次都重查）。</summary>
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(30);
+
+    /// <summary>「别名都查干净了但没有数据」的缓存时长，故意做得很短。</summary>
+    private static readonly TimeSpan NegativeCacheTtl = TimeSpan.FromMinutes(5);
 
     private const int CacheCapacity = 2000;
 
@@ -93,6 +103,9 @@ public static class ActorAliasMerger
     {
         public MergedActorInfo Result;
         public long LastAccessTicks;
+
+        /// <summary>本条缓存的有效期（正/负结果不一样长）。</summary>
+        public long TtlTicks;
     }
 
     /// <summary>
@@ -141,6 +154,9 @@ public static class ActorAliasMerger
         var filled = new List<string>();
         var attempts = 0;
 
+        // 这一轮里是否有「超时 / 网络失败」——有就不写缓存，下次请求立刻重试。
+        var attemptFailed = false;
+
         foreach (var alias in aliases)
         {
             if (matched.Count >= maxHits) break;
@@ -157,13 +173,15 @@ public static class ActorAliasMerger
                 log?.Invoke(string.Format(
                     "[MetaTube] 别名合并：{0} 查询预算 {1:F0}s 用尽，剩余别名跳过。",
                     name, TotalBudget.TotalSeconds));
+                attemptFailed = true;
                 break;
             }
 
             attempts++;
             cancellationToken.ThrowIfCancellationRequested();
 
-            var other = await ResolveAsync(alias, main, log, cancellationToken).ConfigureAwait(false);
+            var (other, failed) = await ResolveAsync(alias, main, log, cancellationToken).ConfigureAwait(false);
+            if (failed) attemptFailed = true;
             if (other == null) continue;
 
             // 别名指回同一条记录：数据已经在主记录里了，不算命中。
@@ -189,6 +207,16 @@ public static class ActorAliasMerger
                 filled.Count - filledBefore, images.Count - imagesBefore));
         }
 
+        if (matched.Count == 0)
+        {
+            // 表里有这个演员、但一个别名都没补到东西：得留一条明确的记录，
+            // 否则界面/日志一片安静，排查时根本分不清是"没合并"还是"合并了没数据"。
+            log?.Invoke(string.Format(
+                "[MetaTube] 别名合并：{0} 的别名（{1}）这次都没拿到可用数据{2}",
+                name, string.Join("、", aliases.Take(Math.Max(1, attempts))),
+                attemptFailed ? "（有查询超时/失败，本次不缓存，下次请求会重试）。" : "（源站确实没有，缓存 5 分钟）。"));
+        }
+
         var result = new MergedActorInfo
         {
             Info = main,
@@ -197,7 +225,12 @@ public static class ActorAliasMerger
             FilledFields = filled
         };
 
-        StoreCache(cacheKey, result);
+        // 缓存策略见类注释：正结果 30 分钟；干净的空结果 5 分钟；有超时/失败一律不缓存。
+        if (matched.Count > 0)
+            StoreCache(cacheKey, result, CacheTtl);
+        else if (!attemptFailed)
+            StoreCache(cacheKey, result, NegativeCacheTtl);
+
         return result;
     }
 
@@ -230,10 +263,12 @@ public static class ActorAliasMerger
     }
 
     /// <summary>
-    /// 按别名到源站搜一条记录并取回详情；找不到、超时、对不上人都返回 null。
+    /// 按别名到源站搜一条记录并取回详情。
+    /// 返回 <c>(null, false)</c> = 干净的空结果（源站确实没有这个人）；
+    /// 返回 <c>(null, true)</c> = 这一趟超时或网络失败（不能当成"没有"，也不该缓存）。
     /// </summary>
-    private static async Task<ActorInfo> ResolveAsync(string alias, ActorInfo main, Action<string> log,
-        CancellationToken cancellationToken)
+    private static async Task<(ActorInfo Info, bool Failed)> ResolveAsync(string alias, ActorInfo main,
+        Action<string> log, CancellationToken cancellationToken)
     {
         List<ActorSearchResult> results;
         try
@@ -248,27 +283,34 @@ public static class ActorAliasMerger
         {
             log?.Invoke(string.Format("[MetaTube] 别名合并：搜索「{0}」超时（{1:F0}s），跳过。",
                 alias, AliasTimeout.TotalSeconds));
-            return null;
+            return (null, true);
         }
         catch (OperationCanceledException)
         {
             // 外层（刷新/任务）主动取消：必须往上抛，不能当成"这个别名没数据"。
             throw;
         }
+        catch (Exception e) when (ApiErrorClassifier.IsNotFound(e))
+        {
+            log?.Invoke(string.Format("[MetaTube] 别名合并：搜索「{0}」源站无此人：{1}", alias, e.Message));
+            return (null, false);
+        }
         catch (Exception e)
         {
-            // 服务端没搜到会返回 404，这里是正常降级，不该当故障。
-            log?.Invoke(string.Format("[MetaTube] 别名合并：搜索「{0}」无结果或失败：{1}", alias, e.Message));
-            return null;
+            log?.Invoke(string.Format("[MetaTube] 别名合并：搜索「{0}」失败：{1}", alias, e.Message));
+            return (null, true);
         }
 
-        if (results == null || results.Count == 0) return null;
+        if (results == null || results.Count == 0) return (null, false);
 
         // 同一数据源的结果优先（跟主记录同源的资料字段口径最一致），其余保持服务端给的顺序。
         var candidates = results
             .Where(r => r != null && !string.IsNullOrWhiteSpace(r.Provider) && !string.IsNullOrWhiteSpace(r.Id))
             .OrderByDescending(r => Same(r.Provider, main.Provider))
             .Take(MaxCandidatesPerAlias);
+
+        // 有候选但一个都没核对成功，也算这一趟失败（不缓存），下次还能重试。
+        var failed = false;
 
         foreach (var candidate in candidates)
         {
@@ -288,6 +330,7 @@ public static class ActorAliasMerger
             {
                 log?.Invoke(string.Format("[MetaTube] 别名合并：取「{0}」({1}:{2}) 详情超时，跳过。",
                     alias, candidate.Provider, candidate.Id));
+                failed = true;
                 continue;
             }
             catch (OperationCanceledException)
@@ -298,6 +341,7 @@ public static class ActorAliasMerger
             {
                 log?.Invoke(string.Format("[MetaTube] 别名合并：取「{0}」({1}:{2}) 详情失败：{3}",
                     alias, candidate.Provider, candidate.Id, e.Message));
+                if (!ApiErrorClassifier.IsNotFound(e)) failed = true;
                 continue;
             }
 
@@ -312,10 +356,10 @@ public static class ActorAliasMerger
                 continue;
             }
 
-            return info;
+            return (info, false);
         }
 
-        return null;
+        return (null, failed);
     }
 
     /// <summary>
@@ -500,7 +544,7 @@ public static class ActorAliasMerger
         if (!Cache.TryGetValue(key, out var entry)) return false;
 
         var now = DateTime.UtcNow.Ticks;
-        if (now - Interlocked.Read(ref entry.LastAccessTicks) > CacheTtl.Ticks)
+        if (now - Interlocked.Read(ref entry.LastAccessTicks) > Interlocked.Read(ref entry.TtlTicks))
         {
             Cache.TryRemove(key, out _);
             return false;
@@ -511,16 +555,18 @@ public static class ActorAliasMerger
         return true;
     }
 
-    private static void StoreCache(string key, MergedActorInfo result)
+    private static void StoreCache(string key, MergedActorInfo result, TimeSpan ttl)
     {
         if (result == null) return;
         if (Cache.Count >= CacheCapacity) EvictCache();
 
+        var now = DateTime.UtcNow.Ticks;
         Cache[key] = new CacheEntry
         {
             // 存快照：调用方后面会就地改 Summary（翻译）等字段，不能污染缓存本体。
             Result = Snapshot(result),
-            LastAccessTicks = DateTime.UtcNow.Ticks
+            LastAccessTicks = now,
+            TtlTicks = ttl.Ticks
         };
     }
 
@@ -530,7 +576,7 @@ public static class ActorAliasMerger
 
         foreach (var kvp in Cache)
         {
-            if (now - Interlocked.Read(ref kvp.Value.LastAccessTicks) > CacheTtl.Ticks)
+            if (now - Interlocked.Read(ref kvp.Value.LastAccessTicks) > Interlocked.Read(ref kvp.Value.TtlTicks))
                 Cache.TryRemove(kvp.Key, out _);
         }
 
