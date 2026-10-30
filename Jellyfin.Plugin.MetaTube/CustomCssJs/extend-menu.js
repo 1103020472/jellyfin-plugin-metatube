@@ -867,10 +867,11 @@
         const pid = item?.ProviderIds?.MetaTube || '';
         const provider = `${pid}`.split(':')[0];
         // 与插件后端 ReviewAppender.SupportedProviders 保持一致（SDK 里实现了 MovieReviewer 的那几家）：
-        //   10musume / 1Pondo / Caribbeancom / CaribbeancomPR / PACOPACOMAMA / FANZA / MGS / HEYZO
+        //   10musume / 1Pondo / Caribbeancom / CaribbeancomPR / PACOPACOMAMA / FANZA / MGS / HEYZO / DUGA
         // MURAMURA 虽然声明了 MovieReviewer 但实现返回 nil（无评论），故不列入。
+        // DUGA 评论量很少（多数作品 0～1 条），点出来经常是「没有新评论」，属正常现象。
         // 大小写不敏感比较：SDK 注册名里 10musume 是小写，CaribbeancomPR 带大写 PR。
-        const REVIEW_PROVIDERS = ['10musume', '1Pondo', 'Caribbeancom', 'CaribbeancomPR', 'PACOPACOMAMA', 'FANZA', 'MGS', 'HEYZO'];
+        const REVIEW_PROVIDERS = ['10musume', '1Pondo', 'Caribbeancom', 'CaribbeancomPR', 'PACOPACOMAMA', 'FANZA', 'MGS', 'HEYZO', 'DUGA'];
         const reviewProviderMatched = REVIEW_PROVIDERS.some(p => p.toLowerCase() === `${provider}`.trim().toLowerCase());
 
         if (item?.Id && reviewProviderMatched) {

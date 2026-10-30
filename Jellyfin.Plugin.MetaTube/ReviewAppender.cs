@@ -38,17 +38,19 @@ public static class ReviewAppender
     /// <summary>
     /// 支持评论的 provider 列表（与 MetaTube SDK 侧 <c>provider.MovieReviewer</c> 的实现一一对应）。
     ///
-    /// 目前 SDK 里声明了 MovieReviewer 的 provider 共 9 个：
-    ///   10musume / 1Pondo / Caribbeancom / CaribbeancomPR / PACOPACOMAMA / FANZA / MGS / MURAMURA / HEYZO
+    /// 目前 SDK 里声明了 MovieReviewer 的 provider 共 10 个：
+    ///   10musume / 1Pondo / Caribbeancom / CaribbeancomPR / PACOPACOMAMA / FANZA / MGS / MURAMURA / HEYZO / DUGA
     /// 其中 MURAMURA 的实现直接返回 nil（<c>no reviews provided</c>），实际永远拿不到评论，
     /// 因此不列入；HEYZO 有完整实现，但其源站在部分网络环境下不可达，拉取会失败并降级为日志提示。
+    /// DUGA 的评论量普遍很少（多数作品 0～1 条，实测最多的也只有十几条），且大量作品一条都没有，
+    /// 空结果属于正常情况。
     ///
     /// 名字大小写与 SDK 注册名保持一致；比较走 <see cref="Supports"/>（大小写不敏感），
     /// 以兼容历史条目的写法差异。
     /// </summary>
     public static readonly string[] SupportedProviders =
     {
-        "10musume", "1Pondo", "Caribbeancom", "CaribbeancomPR", "PACOPACOMAMA", "FANZA", "MGS", "HEYZO"
+        "10musume", "1Pondo", "Caribbeancom", "CaribbeancomPR", "PACOPACOMAMA", "FANZA", "MGS", "HEYZO", "DUGA"
     };
 
     /// <summary>该 provider 是否支持评论（大小写不敏感，忽略首尾空白）。</summary>

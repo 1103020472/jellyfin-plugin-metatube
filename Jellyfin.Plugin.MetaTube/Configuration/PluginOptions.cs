@@ -692,7 +692,7 @@ public class MetadataOptions
     // 是否要获取评论（支持 SDK 里所有实现了 MovieReviewer 的 provider）
 #if __EMBY__
     [DisplayName("获取观众评论")]
-    [Description("刮削时抓取观众评论（支持 FANZA / MGS / 10musume / 1Pondo / Caribbeancom / CaribbeancomPR / PACOPACOMAMA / HEYZO）。")]
+    [Description("刮削时抓取观众评论（支持 FANZA / MGS / 10musume / 1Pondo / Caribbeancom / CaribbeancomPR / PACOPACOMAMA / HEYZO / DUGA）。")]
 #endif
     public bool ReviewSwitch { get; set; } = false;
 
