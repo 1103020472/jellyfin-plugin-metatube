@@ -179,7 +179,7 @@ internal sealed class MetaTubeMainPageController : IPluginUIPageController, IHas
             DisplayName = "MetaTube",
             IsMainConfigPage = true,
             EnableInMainMenu = true,
-            MenuIcon = "video_settings"
+            MenuIcon = "video_library"
         };
 
         _tabPages.Add(CreateTab("BadgeImageOptions", "角标 / 图片",
