@@ -53,4 +53,13 @@ public class ActorInfo : ActorSearchResult
     /// </summary>
     [JsonIgnore]
     public bool SummaryTranslated { get; set; }
+
+    /// <summary>
+    /// 浅拷贝。数组字段按引用复制 —— 现有的合并/写入逻辑都是整体替换数组，
+    /// 不会原地修改，所以浅拷贝足够；用途是合并结果缓存不被调用方就地改写。
+    /// </summary>
+    public ActorInfo Clone()
+    {
+        return (ActorInfo)MemberwiseClone();
+    }
 }

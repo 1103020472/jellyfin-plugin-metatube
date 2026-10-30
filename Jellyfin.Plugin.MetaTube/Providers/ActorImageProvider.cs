@@ -1,4 +1,5 @@
 using Jellyfin.Plugin.MetaTube.Extensions;
+using Jellyfin.Plugin.MetaTube.Helpers;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
@@ -36,20 +37,21 @@ public class ActorImageProvider : BaseProvider, IRemoteImageProvider, IHasOrder
 
         var actorInfo = await ApiClient.GetActorInfoAsync(pid.Provider, pid.Id, cancellationToken);
 
-        if (actorInfo.Images?.Any() != true)
+        // 别名资料合并：替换表里这个演员的别名，只要在源站有数据就合并进来。
+        // 头像规则：主记录的图在前（av-league 优先，沿用原行为），别名的图按表内顺序接在后；
+        // 每张图记住自己的来源记录 —— 图片地址是 /v1/images/primary/{provider}/{id}?url=...，
+        // 别名带来的图必须用别名那条记录的 provider/id 去拼。
+        var merged = await ActorAliasMerger.MergeAsync(
+            actorInfo, item.Name, message => Logger.Info(message), cancellationToken);
+
+        if (merged.Images.Count == 0)
             return Enumerable.Empty<RemoteImageInfo>();
 
-        // 服务端会为日语演员注入 Gfriends 图片且放在列表最前面，
-        // 这里把 AV-LEAGUE 自己的头像排到最前，保证自动下载时优先使用 AV-LEAGUE 的头像。
-        var images = actorInfo.Images
-            .OrderByDescending(image => image.Contains("av-league.com", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-
-        return images.Select(image => new RemoteImageInfo
+        return merged.Images.Select(image => new RemoteImageInfo
         {
             ProviderName = Name,
             Type = ImageType.Primary,
-            Url = ApiClient.GetPrimaryImageApiUrl(actorInfo.Provider, actorInfo.Id, image, 0.5, true)
+            Url = ApiClient.GetPrimaryImageApiUrl(image.Provider, image.Id, image.Url, 0.5, true)
         });
     }
 

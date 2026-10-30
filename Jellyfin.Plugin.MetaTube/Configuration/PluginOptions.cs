@@ -724,6 +724,46 @@ public class MetadataOptions
     [Description("刷新元数据时强制服务端回源站重新抓取，而不使用服务端缓存。")]
 #endif
     public bool EnableForceRefetch { get; set; } = false;
+
+    // ============================================================
+    // 演员别名资料合并
+    //
+    // 「替换表」那个 tab 是自定义界面（列表 + 表单），放在那里反射表单不会显示，
+    // 所以这几项挂在这个分组里（本分组走的是反射表单，改动即时生效）。
+    // ============================================================
+
+    /// <summary>
+    /// 填充演员详情/头像时，是否按替换表把该演员别名的数据合并进来。
+    /// 与 <c>Substitution.EnableActorSubstitution</c> 无关（后者只管影片刮削时把别名换成常用名）。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("合并演员别名资料")]
+    [Description(
+        "填充演员详情与头像时，用替换表里该演员的别名到源站再查一遍，把有数据的别名合并进来：字段主名优先、主名没有才用别名，头像合并去重。")]
+#endif
+    public bool EnableActorAliasMerge { get; set; } = true;
+
+    /// <summary>
+    /// 别名合并时最多尝试几个别名（表里挂了很多别名时的兜底，防止一轮扫太多次源站）。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("别名合并：最多尝试个数")]
+    [Description("按替换表里的别名顺序逐个查，最多尝试这么多个（默认 6）。")]
+    [MinValue(1)]
+    [MaxValue(20)]
+#endif
+    public int ActorAliasMergeMaxAttempts { get; set; } = 6;
+
+    /// <summary>
+    /// 别名合并时最多凑几个「有数据」的别名（有数据 = 至少补进 1 个字段或 1 张图）。
+    /// </summary>
+#if __EMBY__
+    [DisplayName("别名合并：最多合并个数")]
+    [Description("凑够这么多个「有数据」的别名就停止查询（默认 3）。没数据的别名不计入。")]
+    [MinValue(1)]
+    [MaxValue(10)]
+#endif
+    public int ActorAliasMergeMaxHits { get; set; } = 3;
 }
 
 /// <summary>替换表：标题 / 演员 / 类型的关键字替换。</summary>
@@ -800,13 +840,27 @@ public class SubstitutionOptions
 
     /// <summary>
     /// 解析后的演员替换表（含可选排除名单）。
+    /// 按「原始文本」做记忆化：这张表在影片刮削时每部片、演员合并时每个人物都要读一次，
+    /// 而解析是逐行字符串处理，没必要重复做；文本一变（用户保存设置）键就变了，自动重新解析。
+    /// 注意：返回的是共享实例，调用方只能读，不能就地改（编辑入口都自己 Parse 新对象）。
     /// </summary>
     public ActorSubstitutionMap GetActorSubstitutionMap()
     {
-        return ActorSubstitutionMap.Parse(
-            ActorRawSubstitutionTable,
-            EnableActorExclusion ? ActorRawExclusionList : string.Empty);
+        var table = ActorRawSubstitutionTable ?? string.Empty;
+        var exclusions = EnableActorExclusion ? ActorRawExclusionList ?? string.Empty : string.Empty;
+        var key = table + "\u0000" + exclusions;
+
+        if (_actorSubstitutionMapCache != null &&
+            string.Equals(_actorSubstitutionMapKey, key, StringComparison.Ordinal))
+            return _actorSubstitutionMapCache;
+
+        _actorSubstitutionMapCache = ActorSubstitutionMap.Parse(table, exclusions);
+        _actorSubstitutionMapKey = key;
+        return _actorSubstitutionMapCache;
     }
+
+    private ActorSubstitutionMap _actorSubstitutionMapCache;
+    private string _actorSubstitutionMapKey;
 
 #if __EMBY__
     [DisplayName("启用类型替换")]

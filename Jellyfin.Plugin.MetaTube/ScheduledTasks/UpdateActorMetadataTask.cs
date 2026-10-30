@@ -1,4 +1,5 @@
 using Jellyfin.Plugin.MetaTube.Extensions;
+using Jellyfin.Plugin.MetaTube.Helpers;
 using Jellyfin.Plugin.MetaTube.Providers;
 using Jellyfin.Plugin.MetaTube.Translation;
 using MediaBrowser.Controller.Entities;
@@ -138,6 +139,11 @@ public class UpdateActorMetadataTask : IScheduledTask
                     (IsAvLeague(pid.Provider) && !overview.Contains(ActorProvider.OverviewMarker));
 
                 var info = await ApiClient.GetActorInfoAsync(pid.Provider, pid.Id, !needRefetch, cancellationToken);
+
+                // 别名资料合并（与 ActorProvider.GetMetadata 同一套逻辑）：
+                // 主记录之外，把替换表里该演员别名在源站的数据合并进来，缺什么补什么。
+                info = (await ActorAliasMerger.MergeAsync(
+                    info, person.Name, message => _logger.Info(message), cancellationToken)).Info;
 
                 // 简介：已经有（翻译过的）简介的人物不再重复翻译，实现幂等、省翻译 token。
                 var existingBio = ActorProvider.ExtractBio(overview);

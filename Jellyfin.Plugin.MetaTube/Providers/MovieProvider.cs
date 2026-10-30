@@ -468,7 +468,8 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             var results = await ApiClient.SearchActorAsync(actor.Name, cancellationToken);
             if (results?.Any() != true)
             {
-                Logger.Warn("Actor not found: {0}", actor.Name);
+                Logger.Warn("演员「{0}」在源站未搜到 → 该人物不会有 MetaTube provider id，" +
+                            "详情与头像都无法填充；请确认替换表里它的常用名能在源站搜到。", actor.Name);
                 return;
             }
             // 优先选择 AV-LEAGUE
@@ -513,7 +514,12 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             // 服务端 /v1/actors/search 在结果数为 0 时返回 404 Not Found
             // （route/search.go: resultsLength == 0），此时插件连图片 URL 都构造不出来。
             // 未刮削过的演员就会走到这里，属于正常现象，不该记成 Error。
-            Logger.Warn("演员 {0} 未搜到，跳过头像设置（服务端返回：{1}）",
+            //
+            // 但这不只是"少一张头像"：人物条目的 MetaTube provider id 也来自这里，
+            // 搜不到 = 没有 pid → 之后的演员详情、RemoteImages 头像列表全都填不上，
+            // 而且补齐任务只处理"有 pid 的人物"，会一直跳过它。所以要说清楚怎么排查。
+            Logger.Warn("演员「{0}」在源站未搜到 → 该人物不会写入 MetaTube provider id，" +
+                        "其详情与头像都无法填充；请确认替换表里它的常用名能在源站搜到（服务端返回：{1}）",
                 actor.Name, e.Message);
         }
         catch (Exception e)

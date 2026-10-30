@@ -1,4 +1,5 @@
 using Jellyfin.Plugin.MetaTube.Extensions;
+using Jellyfin.Plugin.MetaTube.Helpers;
 using Jellyfin.Plugin.MetaTube.Metadata;
 using Jellyfin.Plugin.MetaTube.Translation;
 using MediaBrowser.Controller.Entities;
@@ -64,6 +65,13 @@ public class ActorProvider : BaseProvider, IRemoteMetadataProvider<Person, Perso
         if (forceRefetch) Logger.Info("Force refetch actor from source site: {0}", pid.ToString());
 
         var m = await ApiClient.GetActorInfoAsync(pid.Provider, pid.Id, !forceRefetch, cancellationToken);
+
+        // 别名资料合并：以当前演员名为身份去替换表里查它的别名，逐个到源站搜，
+        // 有数据的就合并进来（字段主名优先、主名缺才用别名；身份字段永远是主记录的）。
+        // 头像这一步用不到，ActorImageProvider 里会单独取合并后的图片列表。
+        m = (await ActorAliasMerger.MergeAsync(m, info.Name, message => Logger.Info(message), cancellationToken))
+            .Info;
+
         Logger.Info("Get actor info: {0} => {1} (生日 {2} / 出道 {3} / 三围 {4})",
             pid.ToString(), m.Name,
             m.Birthday.Year > 1 ? m.Birthday.ToString("yyyy-MM-dd") : "未知",

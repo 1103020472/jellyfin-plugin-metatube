@@ -588,6 +588,29 @@ public class PluginConfiguration : BasePluginConfiguration
         return Substitution.GetActorSubstitutionMap();
     }
 
+    // 演员别名资料合并（配置项挂在「评论 / 刷新」分组里：替换表那个 tab 是自定义界面，
+    // 反射表单在那里不显示）。
+    [Browsable(false)]
+    public bool EnableActorAliasMerge
+    {
+        get => Metadata.EnableActorAliasMerge;
+        set => Metadata.EnableActorAliasMerge = value;
+    }
+
+    [Browsable(false)]
+    public int ActorAliasMergeMaxAttempts
+    {
+        get => Metadata.ActorAliasMergeMaxAttempts;
+        set => Metadata.ActorAliasMergeMaxAttempts = value;
+    }
+
+    [Browsable(false)]
+    public int ActorAliasMergeMaxHits
+    {
+        get => Metadata.ActorAliasMergeMaxHits;
+        set => Metadata.ActorAliasMergeMaxHits = value;
+    }
+
     [Browsable(false)]
     public bool EnableGenreSubstitution
     {
